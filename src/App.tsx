@@ -144,7 +144,6 @@ export default function App() {
   }, [])
 
   const headerTitle = useMemo(() => {
-    if (view === 'documents') return 'Documents'
     if (view === 'settings') return 'Settings'
     return chat.activeSession.title
   }, [view, chat.activeSession.title])
@@ -216,10 +215,9 @@ export default function App() {
             />
           )}
 
-          {isRagEnabled && documents.documents.length === 0 ? (
+          {ragMode && documents.documents.length === 0 ? (
             <p className="mx-4 mb-1 w-full max-w-3xl rounded-xl border border-line bg-surface/70 px-3.5 py-2.5 text-[11px] leading-relaxed text-ink-subtle sm:mx-6">
-              Document mode is on, but nothing is attached yet. Add files from the Documents panel -
-              indexing arrives with the RAG stage.
+              Document mode is on, but nothing is attached yet. Attach files from the chat input.
             </p>
           ) : null}
 
@@ -249,6 +247,16 @@ export default function App() {
             isStreaming={chat.status === 'streaming'}
             sendOnEnter={sendOnEnter}
             documentCount={serverDocList.length + documents.documents.length}
+            attachedFiles={[...serverDocList.map((d: any) => ({ id: d.id, name: d.filename, status: d.status })), ...documents.documents.map((d) => ({ id: d.id, name: d.name, status: d.status }))]}
+            onRemoveAttached={async (id) => {
+              if (serverDocList.find((d: any) => d.id === id) && auth.user) {
+                await serverDocs.remove(id).catch(() => {})
+                setServerDocList(await serverDocs.list().catch(() => []))
+                if (selectedDocId === id) setSelectedDocId(null)
+              } else {
+                documents.remove(id)
+              }
+            }}
             onAttachFiles={(files) => {
               if (auth.user) handleServerFiles(files)
               else documents.addFiles(files)
@@ -275,7 +283,7 @@ export default function App() {
         </>
       ) : null}
 
-      {view === 'documents' ? (
+      {false && view === 'documents' ? (
         <div className="min-h-0 flex-1 overflow-y-auto">
           <DocumentPanel
             documents={documents.documents}
@@ -286,12 +294,6 @@ export default function App() {
             onServerRemove={async (id) => {
               await serverDocs.remove(id)
               setServerDocList(await serverDocs.list())
-            }}
-            onChatWithDocument={(id) => {
-              setSelectedDocId(id)
-              setRagMode(true)
-              setView('chat')
-              setIsSidebarOpen(false)
             }}
             uploading={uploading}
             uploadError={uploadError}

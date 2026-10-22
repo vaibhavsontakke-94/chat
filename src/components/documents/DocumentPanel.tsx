@@ -1,5 +1,5 @@
 import { useRef, useState, type ChangeEvent, type DragEvent } from 'react'
-import { FileText, MessageSquare, Trash2, UploadCloud } from 'lucide-react'
+import { FileText, Trash2, UploadCloud } from 'lucide-react'
 import type { UploadedDocument } from '../../hooks/useDocuments'
 import { ACCEPTED_EXTENSIONS, MAX_FILE_SIZE_BYTES, formatFileSize } from '../../hooks/useDocuments'
 import { cn } from '../../lib/cn'
@@ -14,7 +14,6 @@ export interface DocumentPanelProps {
   onClear: () => void
   serverDocuments?: Array<any>
   onServerRemove?: (id: string) => void
-  onChatWithDocument?: (id: string) => void
   uploading?: boolean
   uploadError?: string | null
   onServerUpload?: (files: File[]) => void
@@ -29,7 +28,6 @@ export function DocumentPanel({
   onClear,
   serverDocuments = [],
   onServerRemove,
-  onChatWithDocument,
   uploading = false,
   uploadError = null,
   onServerUpload,
@@ -184,11 +182,6 @@ export function DocumentPanel({
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  {doc.status === 'ready' && onChatWithDocument ? (
-                    <Button variant="ghost" size="sm" leadingIcon={<MessageSquare className="h-3.5 w-3.5" />} onClick={() => onChatWithDocument(doc.id)}>
-                      Chat with this document
-                    </Button>
-                  ) : null}
                   {confirmDelete === doc.id ? (
                     <>
                       <Button variant="ghost" size="sm" onClick={() => setConfirmDelete(null)}>

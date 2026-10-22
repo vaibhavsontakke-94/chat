@@ -1,11 +1,11 @@
-import { Clock, FileText, Plus, Settings, Sparkles, Trash2, X } from 'lucide-react'
+import { Clock, Plus, Settings, Sparkles, Trash2, X } from 'lucide-react'
 import type { ChatSession, ProviderInfo } from '../../types/chat'
 import { cn } from '../../lib/cn'
 import { formatRelativeTime } from '../../lib/format'
 import { Button } from '../ui/Button'
 import { IconButton } from '../ui/IconButton'
 
-export type AppView = 'chat' | 'documents' | 'settings'
+export type AppView = 'chat' | 'settings'
 
 export interface SidebarProps {
   sessions: ChatSession[]
@@ -23,7 +23,6 @@ export interface SidebarProps {
 
 const NAV_ITEMS: Array<{ id: AppView; label: string; icon: typeof Clock }> = [
   { id: 'chat', label: 'Chat', icon: Clock },
-  { id: 'documents', label: 'Documents', icon: FileText },
   { id: 'settings', label: 'Settings', icon: Settings },
 ]
 
