@@ -1,7 +1,6 @@
 import { useEffect, useRef, type ChangeEvent, type KeyboardEvent } from 'react'
 import { ArrowUp, Paperclip, Square } from 'lucide-react'
 import { cn } from '../../lib/cn'
-import { Switch } from '../ui/Switch'
 
 export interface ChatInputProps {
   value: string
@@ -10,10 +9,9 @@ export interface ChatInputProps {
   onStop: () => void
   isStreaming: boolean
   sendOnEnter: boolean
-  isRagEnabled: boolean
-  onRagChange: (enabled: boolean) => void
   documentCount: number
-  onAttach: () => void
+  onAttach?: () => void
+  onAttachFiles?: (files: File[]) => void
   maxChars: number
   disabled?: boolean
   disabledReason?: string
@@ -28,15 +26,15 @@ export function ChatInput({
   onStop,
   isStreaming,
   sendOnEnter,
-  isRagEnabled,
-  onRagChange,
   documentCount,
   onAttach,
+  onAttachFiles,
   maxChars,
   disabled = false,
   disabledReason,
 }: ChatInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     const element = textareaRef.current
@@ -59,6 +57,14 @@ export function ChatInput({
       event.preventDefault()
       if (!disabled && !isStreaming && value.trim().length > 0) onSend()
     }
+  }
+
+  const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? [])
+    if (files.length > 0 && onAttachFiles) {
+      onAttachFiles(files)
+    }
+    event.target.value = ''
   }
 
   const charactersLeft = maxChars - value.length
@@ -87,7 +93,7 @@ export function ChatInput({
             onChange={handleChange}
             onKeyDown={handleKeyDown}
             disabled={disabled}
-            placeholder={isRagEnabled ? 'Ask a question about your documents…' : 'Send a message…'}
+            placeholder="Send a message…"
             aria-label="Message"
             className={cn(
               'max-h-[220px] w-full resize-none bg-transparent px-3 py-2.5 text-sm leading-relaxed text-ink outline-none',
@@ -96,9 +102,19 @@ export function ChatInput({
           />
 
           <div className="flex items-center gap-2 px-1 pb-0.5">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept=".pdf,.txt,.md,.docx,.doc,.csv,.json,.html,.htm,.ppt,.pptx,.xls,.xlsx"
+              onChange={handleFileChange}
+              className="hidden"
+            />
             <button
               type="button"
-              onClick={onAttach}
+              onClick={() => {
+                fileInputRef.current?.click()
+              }}
               disabled={disabled}
               aria-label="Attach documents"
               title="Attach documents"
@@ -111,17 +127,7 @@ export function ChatInput({
               ) : null}
             </button>
 
-            <div className="flex min-w-0 flex-1 items-center gap-2">
-              <Switch
-                size="sm"
-                inline
-                checked={isRagEnabled}
-                onCheckedChange={onRagChange}
-                disabled={disabled}
-                label="Chat with Documents"
-                className="min-w-0"
-              />
-            </div>
+            <div className="flex min-w-0 flex-1 items-center gap-2" />
 
             <span
               className={cn(

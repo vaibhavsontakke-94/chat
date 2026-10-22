@@ -1,9 +1,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import type { AppConfig } from '../config.ts'
-import { getAuthUser } from '../middleware/auth.ts'
-import { getServiceSupabase } from '../lib/supabase/service.ts'
-import { HttpError, sendError, sendJson, readJsonBody } from '../lib/http.ts'
-import { MAX_BODY_BYTES } from '../constants.ts'
+import type { AppConfig } from '../../config.ts'
+import { getAuthUser } from '../../middleware/auth.ts'
+import { getServiceSupabase } from '../../lib/supabase/service.ts'
+import { HttpError, sendError, sendJson, readJsonBody } from '../../lib/http.ts'
+import { MAX_BODY_BYTES } from '../../constants.ts'
 
 function getUserId(req: IncomingMessage, config: AppConfig): string | null {
   const user = getAuthUser(req, config)

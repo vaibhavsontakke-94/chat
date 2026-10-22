@@ -1,4 +1,4 @@
-import { useAuth } from './AuthProvider'
+import { useAuth } from '../lib/auth/AuthProvider'
 
 export interface PersistedConversation {
   id: string

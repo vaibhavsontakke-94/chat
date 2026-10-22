@@ -125,18 +125,12 @@ export async function streamChat(
   input: StreamChatInput,
   handlers: StreamChatHandlers,
 ): Promise<StreamChatResult> {
-  let response: Response
+    let response: Response
 
-  try {
-    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('sb-access-token') : null
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-    // Try to get token from supabase session if available
     try {
-      const supa = (window as any).__SUPABASE__?.auth?.getSession
-      // fallback: not easily accessible; rely on header if set elsewhere - but better to read from storage
-    } catch {}
-    // Also check common supabase key
-    if (!token) {
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('sb-access-token') : null
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (!token) {
       for (let i = 0; i < localStorage.length; i++) {
         const k = localStorage.key(i)
         if (k && k.includes('auth-token')) {

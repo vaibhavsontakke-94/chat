@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js'
-import type { AppConfig } from '../config.ts'
+import type { AppConfig } from '../../config.ts'
 
 let serviceClient: ReturnType<typeof createClient> | null = null
 

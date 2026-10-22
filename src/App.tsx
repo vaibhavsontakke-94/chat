@@ -25,12 +25,12 @@ const MAX_MESSAGE_CHARS = 8_000
 export default function App() {
   const { sendOnEnter, showTimestamps } = usePreferences()
   const auth = useAuth()
-  const conversationsApi = useConversations()
+  void useConversations()
 
   const [view, setView] = useState<AppView>('chat')
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const [composer, setComposer] = useState('')
-  const [isRagEnabled, setIsRagEnabled] = useState(false)
+  const [isRagEnabled] = useState(false)
   const [provider, setProvider] = useState<ProviderInfo>({
     status: 'unknown',
     provider: 'unknown',
@@ -39,9 +39,9 @@ export default function App() {
   const [models, setModels] = useState<ModelOption[]>([])
   const [activeModel, setActiveModel] = useState<string | null>(null)
   const [isLoadingModels, setIsLoadingModels] = useState(false)
-  const [persistedConvs, setPersistedConvs] = useState<Array<{ id: string; title: string; created_at: string; updated_at: string }>>([])
-  const [loadingHistory, setLoadingHistory] = useState(false)
-  const [historyError, setHistoryError] = useState<string | null>(null)
+  const [persistedConvs] = useState<Array<{ id: string; title: string; created_at: string; updated_at: string }>>([])
+  const [loadingHistory] = useState(false)
+  const [historyError] = useState<string | null>(null)
 
   const [ragMode, setRagMode] = useState(false)
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null)
@@ -107,8 +107,9 @@ export default function App() {
   const handleServerFiles = useCallback(async (files: File[]) => {
     setUploadError(null)
     for (const f of files) {
-      if (!f.name.toLowerCase().endsWith('.pdf')) {
-        setUploadError('Only PDF files are allowed.')
+      const lower = f.name.toLowerCase()
+      if (!lower.endsWith('.pdf') && !lower.endsWith('.txt') && !lower.endsWith('.md') && !lower.endsWith('.docx') && !lower.endsWith('.doc') && !lower.endsWith('.csv') && !lower.endsWith('.json') && !lower.endsWith('.html') && !lower.endsWith('.htm')) {
+        setUploadError('Only supported document types are allowed.')
         continue
       }
       setUploading(true)
@@ -247,16 +248,14 @@ export default function App() {
             onStop={chat.cancel}
             isStreaming={chat.status === 'streaming'}
             sendOnEnter={sendOnEnter}
-            isRagEnabled={ragMode}
-            onRagChange={(v) => {
-              setRagMode(v)
-              if (!v) setSelectedDocId(null)
+            documentCount={serverDocList.length + documents.documents.length}
+            onAttachFiles={(files) => {
+              if (auth.user) handleServerFiles(files)
+              else documents.addFiles(files)
             }}
-            documentCount={documents.documents.length}
-            onAttach={() => handleViewChange('documents')}
             maxChars={MAX_MESSAGE_CHARS}
-            disabled={!providerReady || (ragMode && !auth.user)}
-            disabledReason={ragMode && !auth.user ? 'Sign in to use document chat.' : composerDisabledReason}
+            disabled={!providerReady}
+            disabledReason={composerDisabledReason}
           />
           {ragMode && auth.user ? (
             <div className="mx-auto mb-2 flex w-full max-w-3xl items-center gap-2 px-4 text-xs text-ink-muted sm:px-6">
@@ -283,42 +282,21 @@ export default function App() {
             onFiles={documents.addFiles}
             onRemove={documents.remove}
             onClear={documents.clear}
+            serverDocuments={auth.user ? serverDocList : []}
+            onServerRemove={async (id) => {
+              await serverDocs.remove(id)
+              setServerDocList(await serverDocs.list())
+            }}
+            onChatWithDocument={(id) => {
+              setSelectedDocId(id)
+              setRagMode(true)
+              setView('chat')
+              setIsSidebarOpen(false)
+            }}
+            uploading={uploading}
+            uploadError={uploadError}
+            onServerUpload={auth.user ? handleServerFiles : undefined}
           />
-          {auth.user ? (
-            <div className="mx-auto mt-4 w-full max-w-3xl px-4 sm:px-6">
-              <div className="rounded-2xl border border-line bg-surface/60">
-                <div className="flex items-center justify-between border-b border-line px-4 py-3">
-                  <h2 className="text-sm font-medium text-ink">Uploaded PDFs (server)</h2>
-                </div>
-                <div className="p-4">
-                  <input
-                    type="file"
-                    accept="application/pdf,.pdf"
-                    multiple
-                    onChange={(e) => {
-                      const files = Array.from(e.target.files ?? [])
-                      if (files.length > 0) handleServerFiles(files)
-                      e.target.value = ''
-                    }}
-                    className="text-xs text-ink-muted"
-                  />
-                  {uploading ? <p className="mt-2 text-xs text-ink-subtle">Uploading & ingesting...</p> : null}
-                  {uploadError ? <p className="mt-2 text-xs text-danger">{uploadError}</p> : null}
-                  <ul className="mt-3 divide-y divide-line/70">
-                    {serverDocList.map((d: any) => (
-                      <li key={d.id} className="flex items-center justify-between py-2 text-xs">
-                        <div>
-                          <p className="text-ink">{d.filename}</p>
-                          <p className="text-ink-subtle">{d.status} · {d.page_count ?? '?'} pages</p>
-                        </div>
-                        <button className="text-danger" onClick={async () => { await serverDocs.remove(d.id); setServerDocList(await serverDocs.list()); }}>Delete</button>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </div>
-            </div>
-          ) : null}
         </div>
       ) : null}
 

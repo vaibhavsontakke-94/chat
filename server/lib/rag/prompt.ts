@@ -27,7 +27,7 @@ export function buildRagPrompt(question: string, chunks: RetrievedChunk[]): { pr
     }
   }
 
-  const citations = chunks.map((c, i) => ({
+  const citations = chunks.map((c: RetrievedChunk) => ({
     filename: c.filename,
     page_number: c.page_number,
     chunk_id: c.chunk_id,
@@ -35,9 +35,9 @@ export function buildRagPrompt(question: string, chunks: RetrievedChunk[]): { pr
   }))
 
   const context = chunks
-    .map((c, i) => {
+    .map((c: RetrievedChunk, idx: number) => {
       const src = `${c.filename}${c.page_number ? ` (page ${c.page_number})` : ''}`
-      return `[${i + 1}] Source: ${src}\n${sanitizeForPrompt(c.content)}`
+      return `[${idx + 1}] Source: ${src}\n${sanitizeForPrompt(c.content)}`
     })
     .join('\n\n')
 

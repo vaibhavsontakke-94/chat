@@ -111,17 +111,18 @@ export async function handleDocuments(
       // Create document record
       const { data: doc, error: docErr } = await supabase
         .from('documents')
-        .insert({ user_id: userId, filename: file.filename, mime_type: file.contentType || 'application/pdf', size_bytes: file.buffer.length, status: 'processing' })
+        .insert({ user_id: userId, filename: file.filename, mime_type: file.contentType || 'application/pdf', size_bytes: file.buffer.length, status: 'processing' } as any)
         .select('id')
         .single()
       if (docErr || !doc) {
         sendError(res, new HttpError(500, 'db_error', 'Failed to create document record.'))
         return
       }
+      const docId = (doc as any).id
 
       // Upload to private bucket (best effort)
       try {
-        await storage.storage.from(DOCUMENTS_BUCKET).upload(`${userId}/${doc.id}/${file.filename}`, file.buffer, { contentType: file.contentType || 'application/pdf', upsert: false })
+        await storage.storage.from(DOCUMENTS_BUCKET).upload(`${userId}/${docId}/${file.filename}`, file.buffer, { contentType: file.contentType || 'application/pdf', upsert: false })
       } catch {
         // continue even if storage upload fails; we can still process text
       }
@@ -131,52 +132,52 @@ export async function handleDocuments(
       try {
         extracted = await extractPdf(file.buffer)
       } catch {
-        await supabase.from('documents').update({ status: 'error' }).eq('id', doc.id).eq('user_id', userId)
-        sendError(res, new HttpError(400, 'extract_failed', 'Failed to extract text from PDF. The file may be scanned or malformed.'))
-        return
-      }
+      await (supabase.from('documents') as any).update({ status: 'error' }).eq('id', docId).eq('user_id', userId)
+      sendError(res, new HttpError(400, 'extract_failed', 'Failed to extract text from PDF. The file may be scanned or malformed.'))
+      return
+    }
 
-      if (extracted.numpages > MAX_PAGES) {
-        await supabase.from('documents').delete().eq('id', doc.id).eq('user_id', userId)
-        sendError(res, new HttpError(400, 'too_many_pages', `PDF has too many pages (max ${MAX_PAGES}).`))
-        return
-      }
+    if (extracted.numpages > MAX_PAGES) {
+      await supabase.from('documents').delete().eq('id', docId).eq('user_id', userId)
+      sendError(res, new HttpError(400, 'too_many_pages', `PDF has too many pages (max ${MAX_PAGES}).`))
+      return
+    }
 
-      const pages = extracted.pages.length > 0 ? extracted.pages : [{ pageNumber: 1, text: extracted.text }]
-      const chunks = chunkPages(pages, { chunkSize: 1000, overlap: 200 })
-      if (chunks.length === 0 || extracted.text.trim().length === 0) {
-        await supabase.from('documents').update({ status: 'error' }).eq('id', doc.id).eq('user_id', userId)
-        sendError(res, new HttpError(400, 'empty_pdf', 'No extractable text found. This may be a scanned PDF (OCR not supported).'))
-        return
-      }
+    const pages = extracted.pages.length > 0 ? extracted.pages : [{ pageNumber: 1, text: extracted.text }]
+    const chunks = chunkPages(pages, { chunkSize: 1000, overlap: 200 })
+    if (chunks.length === 0 || extracted.text.trim().length === 0) {
+      await (supabase.from('documents') as any).update({ status: 'error' }).eq('id', docId).eq('user_id', userId)
+      sendError(res, new HttpError(400, 'empty_pdf', 'No extractable text found. This may be a scanned PDF (OCR not supported).'))
+      return
+    }
 
-      // Embed
-      try {
-        const texts = chunks.map((c: any) => c.content)
-        const embeddings = await embedText(texts, config)
-        const rows = chunks.map((c: any, i: number) => ({
-          document_id: doc.id,
-          user_id: userId,
-          chunk_index: c.index,
-          page_number: c.pageNumber,
-          content: c.content,
-          embedding: embeddings[i],
-        }))
-        // Insert in batches
-        const batchSize = 50
-        for (let i = 0; i < rows.length; i += batchSize) {
-          const batch = rows.slice(i, i + batchSize)
-          const { error: insErr } = await supabase.from('document_chunks').insert(batch)
-          if (insErr) throw insErr
-        }
-        await supabase.from('documents').update({ status: 'ready', page_count: extracted.numpages }).eq('id', doc.id).eq('user_id', userId)
-        sendJson(res, 200, { documentId: doc.id, chunks: chunks.length, status: 'ready' })
+    // Embed
+    try {
+      const texts = chunks.map((c: any) => c.content)
+      const embeddings = await embedText(texts, config)
+      const rows = chunks.map((c: any, i: number) => ({
+        document_id: docId,
+        user_id: userId,
+        chunk_index: c.index,
+        page_number: c.pageNumber,
+        content: c.content,
+        embedding: embeddings[i],
+      }))
+      // Insert in batches
+      const batchSize = 50
+      for (let i = 0; i < rows.length; i += batchSize) {
+        const batch = rows.slice(i, i + batchSize)
+        const { error: insErr } = await (supabase.from('document_chunks') as any).insert(batch)
+        if (insErr) throw insErr
+      }
+      await (supabase.from('documents') as any).update({ status: 'ready', page_count: extracted.numpages }).eq('id', docId).eq('user_id', userId)
+        sendJson(res, 200, { documentId: docId, chunks: chunks.length, status: 'ready' })
         return
       } catch (e: any) {
         // cleanup partial
-        try { await supabase.from('document_chunks').delete().eq('document_id', doc.id).eq('user_id', userId) } catch {}
-        try { await supabase.from('documents').delete().eq('id', doc.id).eq('user_id', userId) } catch {}
-        try { await storage.storage.from(DOCUMENTS_BUCKET).remove([`${userId}/${doc.id}/${file.filename}`]) } catch {}
+        try { await supabase.from('document_chunks').delete().eq('document_id', docId).eq('user_id', userId) } catch {}
+        try { await supabase.from('documents').delete().eq('id', docId).eq('user_id', userId) } catch {}
+        try { await storage.storage.from(DOCUMENTS_BUCKET).remove([`${userId}/${docId}/${file.filename}`]) } catch {}
         sendError(res, new HttpError(500, 'ingest_failed', e?.message || 'Ingestion failed.'))
         return
       }
@@ -213,8 +214,8 @@ export async function handleDocuments(
     const { data: doc } = await supabase.from('documents').select('filename').eq('id', id).eq('user_id', userId).maybeSingle()
     try { await supabase.from('document_chunks').delete().eq('document_id', id).eq('user_id', userId) } catch {}
     const { error } = await supabase.from('documents').delete().eq('id', id).eq('user_id', userId)
-    if (doc?.filename) {
-      try { await storage.storage.from(DOCUMENTS_BUCKET).remove([`${userId}/${id}/${doc.filename}`]) } catch {}
+    if ((doc as any)?.filename) {
+      try { await storage.storage.from(DOCUMENTS_BUCKET).remove([`${userId}/${id}/${(doc as any).filename}`]) } catch {}
     }
     if (error) {
       sendError(res, new HttpError(500, 'db_error', 'Failed to delete document.'))

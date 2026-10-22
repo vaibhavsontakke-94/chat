@@ -1,6 +1,3 @@
-import { createClient } from '@supabase/supabase-js'
-import type { AppConfig } from './config.ts'
-
 export interface AppConfig {
   port: number
   groqApiKey: string | null

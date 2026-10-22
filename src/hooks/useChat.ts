@@ -26,6 +26,7 @@ type Action =
     }
   | { type: 'message/delta'; sessionId: string; id: string; text: string }
   | { type: 'message/meta'; sessionId: string; id: string; model: string }
+  | { type: 'message/citations'; sessionId: string; id: string; citations: any[] }
   | { type: 'message/complete'; sessionId: string; id: string }
   | { type: 'message/fail'; sessionId: string; id: string; error: string; userMessageId: string }
   | { type: 'message/cancel'; sessionId: string; id: string }
@@ -141,6 +142,17 @@ function reducer(state: ChatState, action: Action): ChatState {
           ...session,
           messages: session.messages.map((message) =>
             message.id === action.id ? { ...message, model: action.model } : message,
+          ),
+        })),
+      }
+
+    case 'message/citations':
+      return {
+        ...state,
+        sessions: mapSession(state, action.sessionId, (session) => ({
+          ...session,
+          messages: session.messages.map((message) =>
+            message.id === action.id ? { ...message, citations: action.citations } : message,
           ),
         })),
       }
@@ -332,15 +344,15 @@ export function useChat(options: UseChatOptions): UseChatResult {
           onStart: ({ model }) => {
             dispatch({ type: 'message/meta', sessionId, id: assistantId, model })
           },
+          onCitations: (citations) => {
+            dispatch({ type: 'message/citations', sessionId, id: assistantId, citations })
+          },
           onDelta: (text) => {
             dispatch({ type: 'message/delta', sessionId, id: assistantId, text })
           },
           onDone: () => {
             abortRef.current = null
             dispatch({ type: 'message/complete', sessionId, id: assistantId })
-          },
-          onCitations: () => {
-            // Citations are emitted by server; UI can be enhanced later
           },
         },
       )

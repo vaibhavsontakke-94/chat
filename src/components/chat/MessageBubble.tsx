@@ -1,4 +1,4 @@
-import { AlertTriangle, RotateCcw, Sparkles } from 'lucide-react'
+import { AlertTriangle, FileText, RotateCcw, Sparkles } from 'lucide-react'
 import type { ChatMessage } from '../../types/chat'
 import { cn } from '../../lib/cn'
 import { formatTime } from '../../lib/format'
@@ -63,6 +63,22 @@ export function MessageBubble({ message, showTimestamp, onRetry }: MessageBubble
             <span className="text-xs text-ink-subtle">Generation stopped.</span>
           ) : null}
         </div>
+
+        {!isUser && message.citations && message.citations.length > 0 ? (
+          <div className="mt-1 flex w-full flex-wrap gap-1.5">
+            {message.citations.map((c: any, idx: number) => (
+              <span
+                key={idx}
+                className="inline-flex items-center gap-1 rounded-lg border border-line bg-surface px-2 py-0.5 text-[10px] text-ink-muted"
+                title={c.content ? c.content.slice(0, 100) : ''}
+              >
+                <FileText className="h-3 w-3" />
+                [{idx + 1}] {c.filename}
+                {c.page_number ? ` · p.${c.page_number}` : ''}
+              </span>
+            ))}
+          </div>
+        ) : null}
 
         <div className="flex items-center gap-2 px-1">
           {showTimestamp ? (

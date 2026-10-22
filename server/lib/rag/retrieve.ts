@@ -1,6 +1,6 @@
-import type { AppConfig } from '../config.ts'
-import { getEmbedModel, getOllamaBaseUrl } from './ingest/embeddings.ts'
-import { getServiceSupabase } from './supabase/service.ts'
+import type { AppConfig } from '../../config.ts'
+import { getEmbedModel, getOllamaBaseUrl } from '../ingest/embeddings.ts'
+import { getServiceSupabase } from '../supabase/service.ts'
 
 export interface RetrievedChunk {
   chunk_id: string
@@ -14,7 +14,7 @@ export interface RetrievedChunk {
 
 export async function retrieveRelevantChunks(
   query: string,
-  userId: string,
+  _userId: string,
   config: AppConfig,
   opts: { topK?: number; threshold?: number; documentId?: string | null } = {},
 ): Promise<RetrievedChunk[]> {
@@ -41,7 +41,7 @@ export async function retrieveRelevantChunks(
   } as any)
   if (error) throw error
 
-  const chunks: RetrievedChunk[] = (data || []).map((row: any) => ({
+  const chunks: RetrievedChunk[] = ((data as any[]) || []).map((row: any) => ({
     chunk_id: row.chunk_id,
     document_id: row.document_id,
     filename: row.filename,
