@@ -1,6 +1,6 @@
 import type { AppConfig } from '../../config.ts'
-import { getEmbedModel, getOllamaBaseUrl } from '../ingest/embeddings.ts'
-import { getServiceSupabase } from '../supabase/service.ts'
+import { embedText } from '../ingest/embeddings.ts'
+import { getUserSupabase } from '../supabase/user.ts'
 
 export interface RetrievedChunk {
   chunk_id: string
@@ -9,48 +9,99 @@ export interface RetrievedChunk {
   page_number: number | null
   chunk_index: number
   content: string
+  metadata: Record<string, unknown>
   similarity: number
 }
 
-export async function retrieveRelevantChunks(
-  query: string,
-  _userId: string,
-  config: AppConfig,
-  opts: { topK?: number; threshold?: number; documentId?: string | null } = {},
-): Promise<RetrievedChunk[]> {
-  const topK = opts.topK ?? 5
-  const threshold = opts.threshold ?? 0.2
-  const baseUrl = getOllamaBaseUrl(config)
-  const model = getEmbedModel(config)
+export interface RetrieveOptions {
+  topK?: number
+  threshold?: number
+  documentId?: string | null
+  documentIds?: string[]
+  conversationId?: string | null
+}
 
-  // Embed question with same model
-  const res = await fetch(`${baseUrl}/api/embeddings`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, prompt: query }),
-  })
-  if (!res.ok) throw new Error('Failed to embed question')
-  const json = (await res.json()) as { embedding?: number[] }
-  if (!Array.isArray(json.embedding)) throw new Error('Invalid embedding')
+interface RawChunk {
+  chunk_id: string
+  document_id: string
+  filename: string
+  page_number: number | null
+  chunk_index: number
+  content: string
+  metadata?: Record<string, unknown> | null
+  similarity?: number
+}
 
-  const supabase = getServiceSupabase(config)
-  const { data, error } = await supabase.rpc('match_document_chunks', {
-    query_embedding: json.embedding,
-    match_count: Math.max(topK, 10),
-    filter_document_id: opts.documentId ?? null,
-  } as any)
-  if (error) throw error
-
-  const chunks: RetrievedChunk[] = ((data as any[]) || []).map((row: any) => ({
+function mapChunks(rows: unknown): RetrievedChunk[] {
+  return ((rows as RawChunk[] | null) ?? []).map((row) => ({
     chunk_id: row.chunk_id,
     document_id: row.document_id,
     filename: row.filename,
     page_number: row.page_number,
     chunk_index: row.chunk_index,
     content: row.content,
+    metadata: row.metadata && typeof row.metadata === 'object' ? row.metadata : {},
     similarity: typeof row.similarity === 'number' ? row.similarity : 0,
   }))
+}
 
-  // Filter by threshold and take topK
-  return chunks.filter((c) => c.similarity >= threshold).slice(0, topK)
+function isMissingFunction(error: { code?: string; message?: string } | null): boolean {
+  if (!error) return false
+  if (error.code === 'PGRST202') return true
+  return /could not find the function|schema cache/i.test(error.message ?? '')
+}
+
+export async function retrieveRelevantChunks(
+  query: string,
+  _userId: string,
+  config: AppConfig,
+  opts: RetrieveOptions = {},
+  accessToken: string,
+): Promise<RetrievedChunk[]> {
+  const topK = opts.topK ?? 5
+  const threshold = opts.threshold ?? 0.2
+  const documentIds = (opts.documentIds ?? []).filter(Boolean)
+  const hasDocumentScope =
+    documentIds.length > 0 || (opts.documentId != null && opts.documentId !== '')
+
+  // Embed the question with the same provider used during ingestion.
+  const [queryEmbedding] = await embedText([query], config)
+
+  // The user-scoped client lets the security-definer RPC derive the owner from
+  // auth.uid(), so a caller can never retrieve another user's chunks.
+  const supabase = getUserSupabase(config, accessToken)
+  const matchCount = hasDocumentScope ? Math.max(topK, 30) : Math.max(topK, 10)
+
+  const { data, error } = await supabase.rpc('match_document_chunks_scoped', {
+    query_embedding: queryEmbedding,
+    match_count: matchCount,
+    filter_document_id: opts.documentId ?? null,
+    filter_document_ids: documentIds.length > 0 ? documentIds : null,
+    filter_conversation_id: opts.conversationId ?? null,
+  } as never)
+
+  let chunks: RetrievedChunk[]
+
+  if (isMissingFunction(error)) {
+    // Deployment may not have migration 004 yet. Stay functional with the
+    // original function, which is still owner-scoped, then filter in-process.
+    const fallback = await supabase.rpc('match_document_chunks', {
+      query_embedding: queryEmbedding,
+      match_count: matchCount,
+      filter_document_id: opts.documentId ?? null,
+    } as never)
+    if (fallback.error) throw fallback.error
+    chunks = mapChunks(fallback.data)
+  } else {
+    if (error) throw error
+    chunks = mapChunks(data)
+  }
+
+  const scoped =
+    documentIds.length > 0
+      ? chunks.filter((chunk) => documentIds.includes(chunk.document_id))
+      : chunks
+
+  // Filter by threshold and take topK.
+  return scoped.filter((chunk) => chunk.similarity >= threshold).slice(0, topK)
 }

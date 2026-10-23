@@ -38,12 +38,21 @@ export function AppShell({
         )}
       />
 
-      <div className="fixed inset-y-0 left-0 z-50 lg:static lg:z-auto">{sidebar}</div>
+      <div
+        className={cn(
+          'fixed inset-y-0 left-0 z-50 transition-[width] duration-200 ease-out lg:static lg:z-auto',
+          isSidebarOpen
+            ? 'pointer-events-auto lg:w-[17rem]'
+            : 'pointer-events-none lg:w-0 lg:overflow-hidden',
+        )}
+      >
+        {sidebar}
+      </div>
 
       <main className="flex min-w-0 flex-1 flex-col">
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0 flex-1">{header}</div>
-          {headerRight ? <div className="mr-2 flex items-center sm:mr-4">{headerRight}</div> : null}
+          {headerRight ? <div className="mr-3 flex shrink-0 items-center sm:mr-5">{headerRight}</div> : null}
         </div>
         {children}
       </main>

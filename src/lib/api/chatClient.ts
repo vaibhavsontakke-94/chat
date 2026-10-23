@@ -23,6 +23,8 @@ export interface StreamChatInput {
   signal: AbortSignal
   rag?: boolean
   documentId?: string | null
+  documentIds?: string[]
+  accessToken?: string | null
 }
 
 export interface StreamChatResult {
@@ -128,22 +130,11 @@ export async function streamChat(
     let response: Response
 
     try {
-      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('sb-access-token') : null
       const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-      if (!token) {
-      for (let i = 0; i < localStorage.length; i++) {
-        const k = localStorage.key(i)
-        if (k && k.includes('auth-token')) {
-          try {
-            const v = JSON.parse(localStorage.getItem(k) || '{}')
-            if (v?.access_token) { headers['Authorization'] = `Bearer ${v.access_token}`; break }
-          } catch {}
-        }
+      if (input.accessToken) {
+        headers['Authorization'] = `Bearer ${input.accessToken}`
       }
-    } else {
-      headers['Authorization'] = `Bearer ${token}`
-    }
-    response = await fetch('/api/chat', {
+      response = await fetch('/api/chat', {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -151,6 +142,7 @@ export async function streamChat(
         model: input.model,
         rag: input.rag,
         documentId: input.documentId,
+        documentIds: input.documentIds,
       }),
       signal: input.signal,
     })

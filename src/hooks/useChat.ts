@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react'
 import { ChatApiError, streamChat, type WireMessage } from '../lib/api/chatClient'
-import type { ChatMessage, ChatSession, ChatStatus } from '../types/chat'
+import type { ChatMessage, ChatSession, ChatStatus, Citation } from '../types/chat'
 
 const MAX_TITLE_LENGTH = 48
 
@@ -16,6 +16,7 @@ interface ChatState {
 type Action =
   | { type: 'session/new'; session: ChatSession }
   | { type: 'session/select'; id: string }
+  | { type: 'session/rename'; id: string; title: string }
   | { type: 'session/delete'; id: string }
   | {
       type: 'message/send'
@@ -32,6 +33,15 @@ type Action =
   | { type: 'message/cancel'; sessionId: string; id: string }
   | { type: 'message/retry'; sessionId: string; assistantId: string; now: number }
   | { type: 'message/remove'; sessionId: string; id: string }
+  | {
+      type: 'messages/prepend'
+      sessionId: string
+      messages: ChatMessage[]
+      hasMore: boolean
+      nextCursor: string | null
+    }
+  | { type: 'session/remote'; sessionId: string; remoteId: string }
+  | { type: 'sessions/hydrate'; sessions: ChatSession[] }
   | { type: 'chat/error'; message: string | null }
 
 function createId(prefix: string): string {
@@ -89,12 +99,29 @@ function reducer(state: ChatState, action: Action): ChatState {
         failedTurn: null,
       }
 
+    case 'session/rename':
+      return {
+        ...state,
+        sessions: state.sessions.map((session) =>
+          session.id === action.id ? { ...session, title: action.title } : session,
+        ),
+      }
+
     case 'session/delete': {
       const sessions = state.sessions.filter((session) => session.id !== action.id)
+      if (sessions.length === 0) {
+        const session = createSession(Date.now())
+        return {
+          ...state,
+          sessions: [session],
+          activeSessionId: session.id,
+          status: 'idle',
+          error: null,
+          failedTurn: null,
+        }
+      }
       const activeSessionId =
-        state.activeSessionId === action.id
-          ? (sessions[0]?.id ?? createSession(Date.now()).id)
-          : state.activeSessionId
+        state.activeSessionId === action.id ? sessions[0].id : state.activeSessionId
       return { ...state, sessions, activeSessionId, failedTurn: null }
     }
 
@@ -238,6 +265,43 @@ function reducer(state: ChatState, action: Action): ChatState {
         })),
       }
 
+    case 'messages/prepend':
+      return {
+        ...state,
+        sessions: mapSession(state, action.sessionId, (session) => {
+          const existing = new Set(session.messages.map((message) => message.id))
+          const older = action.messages.filter((message) => !existing.has(message.id))
+          return {
+            ...session,
+            messages: [...older, ...session.messages],
+            hasMoreMessages: action.hasMore,
+            oldestMessageCursor: action.nextCursor,
+          }
+        }),
+      }
+
+    case 'session/remote':
+      return {
+        ...state,
+        sessions: mapSession(state, action.sessionId, (session) => ({
+          ...session,
+          remoteId: action.remoteId,
+        })),
+      }
+
+    case 'sessions/hydrate': {
+      const sessions =
+        action.sessions.length > 0 ? action.sessions : [createSession(Date.now())]
+      return {
+        ...state,
+        sessions,
+        activeSessionId: sessions[0]?.id ?? state.activeSessionId,
+        status: 'idle',
+        error: null,
+        failedTurn: null,
+      }
+    }
+
     case 'chat/error':
       return { ...state, error: action.message }
 
@@ -246,10 +310,28 @@ function reducer(state: ChatState, action: Action): ChatState {
   }
 }
 
+export interface PersistedMessageInput {
+  role: 'user' | 'assistant'
+  content: string
+  model?: string | null
+  clientMessageId?: string
+  citations?: Citation[]
+}
+
+export interface ChatPersistence {
+  createConversation: (title?: string, clientId?: string) => Promise<{ id: string } | null>
+  addMessage: (conversationId: string, message: PersistedMessageInput) => Promise<boolean>
+  removeConversation?: (id: string) => Promise<boolean>
+}
+
 export interface UseChatOptions {
   model: string | null
   rag?: boolean
   documentId?: string | null
+  documentIdsBySession?: Record<string, string[]>
+  accessToken?: string | null
+  persistence?: ChatPersistence | null
+  onUnauthorized?: () => void
 }
 
 export interface UseChatResult {
@@ -264,8 +346,16 @@ export interface UseChatResult {
   retry: () => void
   newChat: () => void
   selectSession: (id: string) => void
+  renameSession: (id: string, title: string) => void
   deleteSession: (id: string) => void
   clearError: () => void
+  hydrate: (sessions: ChatSession[]) => void
+  reset: () => void
+  prependMessages: (
+    sessionId: string,
+    messages: ChatMessage[],
+    page: { hasMore: boolean; nextCursor: string | null },
+  ) => void
 }
 
 export function useChat(options: UseChatOptions): UseChatResult {
@@ -285,7 +375,13 @@ export function useChat(options: UseChatOptions): UseChatResult {
   const modelRef = useRef(options.model)
   const ragRef = useRef(options.rag)
   const docRef = useRef(options.documentId)
+  const documentIdsBySessionRef = useRef(options.documentIdsBySession)
+  const accessTokenRef = useRef(options.accessToken)
+  const persistenceRef = useRef(options.persistence)
+  const onUnauthorizedRef = useRef(options.onUnauthorized)
   const abortRef = useRef<AbortController | null>(null)
+  const remoteIdsRef = useRef(new Map<string, string>())
+  const persistQueueRef = useRef(new Map<string, Promise<void>>())
 
   useEffect(() => {
     stateRef.current = state
@@ -300,12 +396,59 @@ export function useChat(options: UseChatOptions): UseChatResult {
   useEffect(() => {
     docRef.current = options.documentId
   }, [options.documentId])
+  useEffect(() => {
+    documentIdsBySessionRef.current = options.documentIdsBySession
+  }, [options.documentIdsBySession])
+  useEffect(() => {
+    accessTokenRef.current = options.accessToken
+  }, [options.accessToken])
+  useEffect(() => {
+    persistenceRef.current = options.persistence
+  }, [options.persistence])
+  useEffect(() => {
+    onUnauthorizedRef.current = options.onUnauthorized
+  }, [options.onUnauthorized])
 
   useEffect(() => {
     return () => {
       abortRef.current?.abort()
     }
   }, [])
+
+  const enqueuePersist = useCallback((sessionId: string, task: () => Promise<void>) => {
+    const previous = persistQueueRef.current.get(sessionId) ?? Promise.resolve()
+    const next = previous.then(task).catch(() => {})
+    persistQueueRef.current.set(sessionId, next)
+    void next.finally(() => {
+      if (persistQueueRef.current.get(sessionId) === next) {
+        persistQueueRef.current.delete(sessionId)
+      }
+    })
+  }, [])
+
+  const persistMessage = useCallback(
+    (sessionId: string, title: string, message: PersistedMessageInput) => {
+      const persistence = persistenceRef.current
+      if (!persistence) return
+
+      enqueuePersist(sessionId, async () => {
+        let remoteId =
+          remoteIdsRef.current.get(sessionId) ??
+          stateRef.current.sessions.find((session) => session.id === sessionId)?.remoteId
+
+        if (!remoteId) {
+          const created = await persistence.createConversation(title, sessionId)
+          if (!created) return
+          remoteId = created.id
+          remoteIdsRef.current.set(sessionId, remoteId)
+          dispatch({ type: 'session/remote', sessionId, remoteId })
+        }
+
+        await persistence.addMessage(remoteId, message)
+      })
+    },
+    [enqueuePersist],
+  )
 
   /** Completed history for a session, oldest first. */
   const completedHistory = useCallback((sessionId: string) => {
@@ -337,22 +480,52 @@ export function useChat(options: UseChatOptions): UseChatResult {
 
       const controller = new AbortController()
       abortRef.current = controller
+      const sessionDocumentIds = documentIdsBySessionRef.current?.[sessionId]
+      const documentIds = sessionDocumentIds ?? undefined
+      const rag = documentIds ? documentIds.length > 0 : Boolean(ragRef.current)
+      const session = stateRef.current.sessions.find((item) => item.id === sessionId)
+      const lastUser = [...context].reverse().find((message) => message.role === 'user')
+      const conversationTitle =
+        session && session.messages.length > 0 ? session.title : titleFrom(lastUser?.content ?? '')
+      let assistantText = ''
+      let assistantModel: string | null = modelRef.current
+      let assistantCitations: Citation[] = []
 
       void streamChat(
-        { messages: context, model: modelRef.current, signal: controller.signal, rag: ragRef.current, documentId: docRef.current },
+        {
+          messages: context,
+          model: modelRef.current,
+          signal: controller.signal,
+          rag,
+          documentId: docRef.current,
+          documentIds,
+          accessToken: accessTokenRef.current,
+        },
         {
           onStart: ({ model }) => {
+            assistantModel = model
             dispatch({ type: 'message/meta', sessionId, id: assistantId, model })
           },
           onCitations: (citations) => {
+            assistantCitations = citations as Citation[]
             dispatch({ type: 'message/citations', sessionId, id: assistantId, citations })
           },
           onDelta: (text) => {
+            assistantText += text
             dispatch({ type: 'message/delta', sessionId, id: assistantId, text })
           },
           onDone: () => {
             abortRef.current = null
             dispatch({ type: 'message/complete', sessionId, id: assistantId })
+            if (assistantText.trim().length > 0) {
+              persistMessage(sessionId, conversationTitle, {
+                role: 'assistant',
+                content: assistantText,
+                model: assistantModel,
+                clientMessageId: assistantId,
+                citations: assistantCitations,
+              })
+            }
           },
         },
       )
@@ -362,6 +535,10 @@ export function useChat(options: UseChatOptions): UseChatResult {
           if (controller.signal.aborted) {
             dispatch({ type: 'message/cancel', sessionId, id: assistantId })
             return
+          }
+
+          if (error instanceof ChatApiError && error.status === 401) {
+            onUnauthorizedRef.current?.()
           }
 
           const message =
@@ -378,7 +555,7 @@ export function useChat(options: UseChatOptions): UseChatResult {
           })
         })
     },
-    [],
+    [persistMessage],
   )
 
   const sendMessage = useCallback(
@@ -405,10 +582,19 @@ export function useChat(options: UseChatOptions): UseChatResult {
         { role: 'user', content: trimmed },
       ]
 
+      const session = stateRef.current.sessions.find((item) => item.id === sessionId)
+      const conversationTitle =
+        session && session.messages.length > 0 ? session.title : titleFrom(trimmed)
+
       dispatch({ type: 'message/send', sessionId, user, assistantId, now })
+      persistMessage(sessionId, conversationTitle, {
+        role: 'user',
+        content: trimmed,
+        clientMessageId: user.id,
+      })
       runCompletion(sessionId, assistantId, context, user.id)
     },
-    [completedHistory, runCompletion],
+    [completedHistory, persistMessage, runCompletion],
   )
 
   const cancel = useCallback(() => {
@@ -437,13 +623,63 @@ export function useChat(options: UseChatOptions): UseChatResult {
     dispatch({ type: 'session/select', id })
   }, [])
 
+  const renameSession = useCallback((id: string, title: string) => {
+    dispatch({ type: 'session/rename', id, title })
+  }, [])
+
   const deleteSession = useCallback((id: string) => {
+    if (stateRef.current.activeSessionId === id) {
+      abortRef.current?.abort()
+      abortRef.current = null
+    }
+
+    const remoteId =
+      remoteIdsRef.current.get(id) ?? stateRef.current.sessions.find((session) => session.id === id)?.remoteId
+    remoteIdsRef.current.delete(id)
+    persistQueueRef.current.delete(id)
+
+    if (remoteId) {
+      void persistenceRef.current?.removeConversation?.(remoteId)
+    }
+
     dispatch({ type: 'session/delete', id })
   }, [])
 
   const clearError = useCallback(() => {
     dispatch({ type: 'chat/error', message: null })
   }, [])
+
+  const hydrate = useCallback((sessions: ChatSession[]) => {
+    remoteIdsRef.current.clear()
+    persistQueueRef.current.clear()
+    for (const session of sessions) {
+      remoteIdsRef.current.set(session.id, session.remoteId ?? session.id)
+    }
+    dispatch({ type: 'sessions/hydrate', sessions })
+  }, [])
+
+  const reset = useCallback(() => {
+    remoteIdsRef.current.clear()
+    persistQueueRef.current.clear()
+    dispatch({ type: 'sessions/hydrate', sessions: [] })
+  }, [])
+
+  const prependMessages = useCallback(
+    (
+      sessionId: string,
+      messages: ChatMessage[],
+      page: { hasMore: boolean; nextCursor: string | null },
+    ) => {
+      dispatch({
+        type: 'messages/prepend',
+        sessionId,
+        messages,
+        hasMore: page.hasMore,
+        nextCursor: page.nextCursor,
+      })
+    },
+    [],
+  )
 
   const activeSession = useMemo(
     () => state.sessions.find((session) => session.id === state.activeSessionId) ?? state.sessions[0],
@@ -462,7 +698,11 @@ export function useChat(options: UseChatOptions): UseChatResult {
     retry,
     newChat,
     selectSession,
+    renameSession,
     deleteSession,
     clearError,
+    hydrate,
+    reset,
+    prependMessages,
   }
 }

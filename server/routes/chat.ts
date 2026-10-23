@@ -5,8 +5,8 @@ import { HttpError, ProviderError } from '../lib/errors.ts'
 import { streamChatCompletion } from '../lib/groq.ts'
 import { clientIp, isOriginAllowed, openSse, readJsonBody, sendError } from '../lib/http.ts'
 import { consumeRateLimit } from '../lib/rateLimit.ts'
-import { validateChatRequest } from '../lib/validate.ts'
-import { getAuthUser } from '../middleware/auth.ts'
+import { isUuid, validateChatRequest } from '../lib/validate.ts'
+import { getAuthUser, getBearerToken } from '../middleware/auth.ts'
 import { retrieveRelevantChunks } from '../lib/rag/retrieve.ts'
 import { buildRagPrompt } from '../lib/rag/prompt.ts'
 
@@ -39,7 +39,13 @@ export async function handleChat(
 
   const raw = body.value as any
   const ragEnabled = raw?.rag === true
-  const documentId = typeof raw?.documentId === 'string' ? raw.documentId : null
+  const documentId = isUuid(raw?.documentId) ? raw.documentId : null
+  const documentIds = Array.isArray(raw?.documentIds)
+    ? raw.documentIds
+        .filter((id: unknown): id is string => isUuid(id))
+        .slice(0, 20)
+    : []
+  const conversationId = isUuid(raw?.conversationId) ? raw.conversationId : null
 
   let request = (await (async () => {
     const validation = validateChatRequest(body.value, { fallbackModel: config.groqChatModel })
@@ -53,9 +59,10 @@ export async function handleChat(
 
   // RAG path
   if (ragEnabled) {
-    const user = getAuthUser(req, config)
-    if (!user) {
-      sendError(res, new HttpError(401, 'unauthorized', 'Sign in required for document chat.'))
+    const user = await getAuthUser(req, config)
+    const accessToken = getBearerToken(req)
+    if (!user || !accessToken) {
+      sendError(res, new HttpError(401, 'unauthorized', 'Authentication required for document chat.'))
       return
     }
     const lastUser = [...request.messages].reverse().find((m) => m.role === 'user')
@@ -64,7 +71,19 @@ export async function handleChat(
       return
     }
     try {
-      const chunks = await retrieveRelevantChunks(lastUser.content, user.id, config, { topK: 5, threshold: 0.2, documentId })
+      const chunks = await retrieveRelevantChunks(
+        lastUser.content,
+        user.id,
+        config,
+        {
+          topK: 5,
+          threshold: 0.2,
+          documentId,
+          documentIds,
+          conversationId,
+        },
+        accessToken,
+      )
       const { prompt, citations } = buildRagPrompt(lastUser.content, chunks)
       // Replace messages with grounded prompt (preserve system if desired minimal)
       request = {

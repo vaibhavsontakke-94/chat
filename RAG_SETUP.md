@@ -17,10 +17,22 @@ What it creates:
   - restricted to authenticated role only
 - No fake vectors or sample documents are inserted.
 
-## 3) Embedding dimension
-Default is **768** for `nomic-embed-text-v1.5` (matches `GROQ_EMBED_MODEL` in `.env.example`). If you use a different embedding model, change `vector(768)` in `document_chunks.embedding` and the function signature/index to match its dimension.
+## 3) Storage bucket and policies
+Run `migrations/003_auth_hardening.sql`. It creates the private `documents` bucket and owner-only storage policies. The server can also create the bucket automatically when `SUPABASE_SERVICE_ROLE_KEY` is set.
 
-## 4) Usage notes
+## 4) Embeddings
+The database expects **768-dimension** vectors. Choose one provider with `EMBEDDINGS_PROVIDER`:
+
+- `local` (default) — built-in deterministic, offline embeddings. Works on Vercel and needs no extra service. Lexical rather than semantic, so quality is lower.
+- `ollama` — set `OLLAMA_BASE_URL` and `OLLAMA_EMBED_MODEL` (for example `nomic-embed-text`). Best local semantic quality, but Ollama cannot run on Vercel.
+- `openai` — set `EMBEDDINGS_API_URL`, `EMBEDDINGS_API_KEY`, and `EMBEDDINGS_MODEL`. Use a model configured for 768 dimensions (for example `text-embedding-3-small` with the `dimensions` parameter).
+- `huggingface` — set `HF_TOKEN` and optionally `HF_EMBEDDING_MODEL` (default `sentence-transformers/all-MiniLM-L6-v2`). The token must be a fine-grained token with **"Make calls to Inference Providers"** permission. Optional `HF_EMBEDDINGS_URL` and `HF_EMBEDDING_BATCH_SIZE` (max 64).
+  MiniLM returns 384-dimension vectors; the server normalizes them and pads with zeros to 768, which preserves cosine similarity and works with the existing `vector(768)` schema.
+  If the token is rejected, create a new token with inference permission or use `EMBEDDINGS_PROVIDER=local`.
+
+If you switch embedding providers, re-upload documents so all chunks use the same vector space. If you want native 384-dimension storage instead of padding, update `vector(768)`, the HNSW index, and `match_document_chunks` in `002_rag_pgvector.sql`.
+
+## 5) Usage notes
 - Always filter by `user_id`/RLS; the function also enforces ownership via `auth.uid()`.
 - For large corpora consider IVFFlat instead of HNSW or tune parameters.
 - This schema is compatible with a future ingestion pipeline (upload PDF → parse → chunk → embed → insert). No changes were made to the existing chat system.

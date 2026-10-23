@@ -1,6 +1,25 @@
 import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
-const pdfParse = require('pdf-parse')
+
+interface PdfTextPage {
+  num: number
+  text: string
+}
+
+interface PdfTextResult {
+  text: string
+  pages: PdfTextPage[]
+  total: number
+}
+
+interface PdfParser {
+  getText(params?: { pageJoiner?: string }): Promise<PdfTextResult>
+  destroy(): Promise<void>
+}
+
+const { PDFParse } = require('pdf-parse') as {
+  PDFParse: new (options: { data: Buffer | Uint8Array }) => PdfParser
+}
 
 export interface PdfPage {
   pageNumber: number
@@ -15,27 +34,23 @@ export interface PdfExtractResult {
 }
 
 export async function extractPdf(buffer: Buffer): Promise<PdfExtractResult> {
-  // pdf-parse can render per page if we pass options; default gives text
-  const data = await pdfParse(buffer)
-  const text = typeof data.text === 'string' ? data.text : ''
-  const numpages = typeof data.numpages === 'number' ? data.numpages : 0
-  // pdf-parse doesn't always split cleanly by page in all versions; try to split by form feed
-  const pages: PdfPage[] = []
-  if (text.includes('\f')) {
-    const parts = text.split('\f')
-    for (let i = 0; i < parts.length; i++) {
-      const t = parts[i]
-      if (typeof t === 'string' && t.trim().length > 0) {
-        pages.push({ pageNumber: i + 1, text: t })
-      } else if (typeof t === 'string' && parts.length === numpages) {
-        // keep empty page if count matches
-        pages.push({ pageNumber: i + 1, text: t })
-      }
+  // pdf-parse v2 exports a PDFParse class; v1 exported a callable function.
+  const parser = new PDFParse({ data: buffer })
+  try {
+    const data = await parser.getText({ pageJoiner: '' })
+    const text = typeof data.text === 'string' ? data.text : ''
+    const numpages = typeof data.total === 'number' ? data.total : 0
+    const pages: PdfPage[] = Array.isArray(data.pages)
+      ? data.pages
+          .filter((page) => page && typeof page.text === 'string')
+          .map((page) => ({ pageNumber: page.num, text: page.text }))
+      : []
+    if (pages.length === 0 && text.trim().length > 0) {
+      // Fallback for versions that only return concatenated text.
+      pages.push({ pageNumber: 1, text })
     }
+    return { text, pages, numpages }
+  } finally {
+    await parser.destroy().catch(() => undefined)
   }
-  if (pages.length === 0 && text.trim().length > 0) {
-    // fallback: single page or unknown
-    pages.push({ pageNumber: 1, text })
-  }
-  return { text, pages, numpages, info: data.info }
 }

@@ -1,7 +1,8 @@
-import { KeyRound, Server, SlidersHorizontal } from 'lucide-react'
+import { KeyRound, Server, SlidersHorizontal, UserRound } from 'lucide-react'
 import type { ReactNode } from 'react'
 import type { ModelOption, ProviderInfo } from '../../types/chat'
 import { usePreferences } from '../../hooks/usePreferences'
+import { useAuth } from '../../lib/auth/AuthProvider'
 import { cn } from '../../lib/cn'
 import { Badge } from '../ui/Badge'
 import { ModelSelector } from '../chat/ModelSelector'
@@ -50,10 +51,36 @@ export function SettingsView({
   documentCount,
 }: SettingsViewProps) {
   const { sendOnEnter, showTimestamps, setPreference } = usePreferences()
+  const auth = useAuth()
   const isReady = provider.status === 'ready'
 
   return (
     <div className="mx-auto w-full max-w-3xl space-y-4 px-4 py-6 sm:px-6">
+      <Card
+        title="Private session"
+        description="Chats and documents are private to this browser."
+        icon={<UserRound className="h-4 w-4" aria-hidden="true" />}
+      >
+        {auth.user ? (
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-sm text-ink">Anonymous session</p>
+              <p className="mt-0.5 truncate font-mono text-[11px] text-ink-subtle">
+                {auth.user.id}
+              </p>
+            </div>
+            <Badge tone="brand">This device</Badge>
+          </div>
+        ) : (
+          <p className="text-xs leading-relaxed text-ink-muted">
+            {auth.error ??
+              (auth.enabled
+                ? 'Starting a private session...'
+                : 'Authentication is not configured on this deployment.')}
+          </p>
+        )}
+      </Card>
+
       <Card
         title="AI provider"
         description="Configured on the server. Credentials never reach the browser."

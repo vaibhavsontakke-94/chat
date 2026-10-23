@@ -5,22 +5,22 @@
     "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 
-  --color-canvas: #08080b;
-  --color-canvas-raised: #0b0b0f;
-  --color-surface: #101014;
-  --color-surface-raised: #16161c;
-  --color-surface-hover: #1c1c23;
-  --color-line: #23232c;
-  --color-line-strong: #30303b;
+  --color-canvas: #101116;
+  --color-canvas-raised: #0c0d12;
+  --color-surface: #1b1c24;
+  --color-surface-raised: #23242d;
+  --color-surface-hover: #2b2c38;
+  --color-line: #2c2d38;
+  --color-line-strong: #454651;
 
-  --color-ink: #f4f4f6;
-  --color-ink-muted: #a2a2ae;
-  --color-ink-subtle: #6d6d7a;
+  --color-ink: #f5f4f8;
+  --color-ink-muted: #aaa8b8;
+  --color-ink-subtle: #777583;
 
-  --color-brand: #7c6cff;
-  --color-brand-strong: #6a55f0;
-  --color-brand-soft: #7c6cff24;
-  --color-brand-glow: #7c6cff40;
+  --color-brand: #c4a7ff;
+  --color-brand-strong: #b493f7;
+  --color-brand-soft: #c4a7ff1f;
+  --color-brand-glow: #c4a7ff3d;
 
   --color-danger: #fb7185;
   --color-danger-soft: #fb718524;
@@ -37,6 +37,7 @@
   --animate-rise: rise 0.28s cubic-bezier(0.22, 1, 0.36, 1);
   --animate-pop: pop 0.18s cubic-bezier(0.22, 1, 0.36, 1);
   --animate-blink: blink 1.1s ease-in-out infinite;
+  --animate-progress: progress 1.35s ease-in-out infinite;
 }
 
 @keyframes fade-in {
@@ -80,6 +81,15 @@
   40% {
     opacity: 1;
     transform: translateY(-2px);
+  }
+}
+
+@keyframes progress {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(320%);
   }
 }
 

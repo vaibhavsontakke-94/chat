@@ -29,7 +29,7 @@ export function MessageBubble({ message, showTimestamp, onRetry }: MessageBubble
           className={cn(
             'rounded-2xl px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap break-words',
             isUser
-              ? 'bg-brand text-white shadow-[0_10px_30px_-12px_var(--color-brand-glow)]'
+              ? 'bg-brand text-[#17131f] shadow-[0_10px_30px_-14px_var(--color-brand-glow)]'
               : 'border border-line bg-surface text-ink',
             isError && 'border-danger/40 bg-danger-soft',
           )}

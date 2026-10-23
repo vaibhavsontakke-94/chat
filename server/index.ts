@@ -27,7 +27,8 @@ async function handleRequest(
   res: import('node:http').ServerResponse,
 ): Promise<void> {
   const url = req.url ?? '/'
-  const path = url.split('?')[0] ?? '/'
+  const [path = '/', query = ''] = url.split('?')
+  const searchParams = new URLSearchParams(query)
 
   try {
     if (path.startsWith('/api/')) {
@@ -72,7 +73,7 @@ async function handleRequest(
       }
 
       if (path.startsWith('/api/conversations')) {
-        await handleConversations(req, res, config, path)
+        await handleConversations(req, res, config, path, searchParams)
         return
       }
 

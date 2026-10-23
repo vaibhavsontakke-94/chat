@@ -1,4 +1,4 @@
-import { Clock, Plus, Settings, Sparkles, Trash2, X } from 'lucide-react'
+import { Plus, Settings, Sparkles, Trash2, X } from 'lucide-react'
 import type { ChatSession, ProviderInfo } from '../../types/chat'
 import { cn } from '../../lib/cn'
 import { formatRelativeTime } from '../../lib/format'
@@ -15,16 +15,10 @@ export interface SidebarProps {
   onSelectSession: (id: string) => void
   onDeleteSession: (id: string) => void
   onNewChat: () => void
-  documentCount: number
   provider: ProviderInfo
   isOpen: boolean
   onClose: () => void
 }
-
-const NAV_ITEMS: Array<{ id: AppView; label: string; icon: typeof Clock }> = [
-  { id: 'chat', label: 'Chat', icon: Clock },
-  { id: 'settings', label: 'Settings', icon: Settings },
-]
 
 export function Sidebar({
   sessions,
@@ -34,31 +28,37 @@ export function Sidebar({
   onSelectSession,
   onDeleteSession,
   onNewChat,
-  documentCount,
   provider,
   isOpen,
   onClose,
 }: SidebarProps) {
   return (
     <aside
+      id="app-sidebar"
+      aria-label="Chat navigation"
       className={cn(
-        'flex h-full w-[17rem] shrink-0 flex-col border-r border-line bg-canvas-raised/80 backdrop-blur-xl',
-        'transition-transform duration-200 lg:translate-x-0',
+        'flex h-full w-[17rem] shrink-0 flex-col border-r border-line/70 bg-canvas-raised',
+        'transition-transform duration-200 ease-out',
         isOpen ? 'translate-x-0' : '-translate-x-full',
       )}
     >
       <div className="flex items-center gap-2.5 px-4 pt-4 pb-3">
-        <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-brand/15 text-brand">
+        <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-brand/10 text-brand">
           <Sparkles className="h-4 w-4" aria-hidden="true" />
         </div>
-        <span className="flex-1 text-sm font-semibold tracking-tight text-ink">chat</span>
-        <IconButton label="Close sidebar" icon={<X className="h-4 w-4" aria-hidden="true" />} onClick={onClose} className="lg:hidden" />
+        <span className="flex-1 text-sm font-semibold tracking-tight text-ink">Nyra AI</span>
+        <IconButton
+          label="Close sidebar"
+          icon={<X className="h-4 w-4" aria-hidden="true" />}
+          onClick={onClose}
+          className="h-8 w-8 rounded-lg lg:hidden"
+        />
       </div>
 
       <div className="px-3 pb-3">
         <Button
-          variant="primary"
-          className="w-full justify-start"
+          variant="secondary"
+          className="h-10 w-full justify-start rounded-xl border-line bg-surface-raised/80 text-[13px] hover:border-line-strong"
           leadingIcon={<Plus className="h-4 w-4" aria-hidden="true" />}
           onClick={onNewChat}
         >
@@ -66,41 +66,12 @@ export function Sidebar({
         </Button>
       </div>
 
-      <nav className="px-3 pb-2">
-        <ul className="flex flex-col gap-0.5">
-          {NAV_ITEMS.map((item) => {
-            const isActive = view === item.id
-            return (
-              <li key={item.id}>
-                <button
-                  type="button"
-                  onClick={() => onViewChange(item.id)}
-                  aria-current={isActive ? 'page' : undefined}
-                  className={cn(
-                    'flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-sm transition-colors',
-                    isActive
-                      ? 'bg-surface-raised text-ink'
-                      : 'text-ink-muted hover:bg-surface-raised/60 hover:text-ink',
-                  )}
-                >
-                  <item.icon className="h-4 w-4 shrink-0" aria-hidden="true" />
-                  <span className="flex-1 text-left">{item.label}</span>
-                  {item.id === 'documents' && documentCount > 0 ? (
-                    <span className="rounded-full bg-surface-raised px-1.5 text-[10px] text-ink-muted">
-                      {documentCount}
-                    </span>
-                  ) : null}
-                </button>
-              </li>
-            )
-          })}
-        </ul>
-      </nav>
-
-      <div className="mt-2 flex min-h-0 flex-1 flex-col border-t border-line/70">
+      <div className="flex min-h-0 flex-1 flex-col border-t border-line/60">
         <div className="flex items-center justify-between px-4 pt-3 pb-1.5">
-          <h2 className="text-[11px] font-medium tracking-wide text-ink-subtle uppercase">Chat history</h2>
-          <span className="text-[11px] text-ink-subtle">{sessions.length}</span>
+          <h2 className="text-[11px] font-medium tracking-wide text-ink-subtle uppercase">
+            Chat history
+          </h2>
+          <span className="text-[11px] tabular-nums text-ink-subtle">{sessions.length}</span>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
@@ -119,7 +90,9 @@ export function Sidebar({
                       onClick={() => onSelectSession(session.id)}
                       className={cn(
                         'flex w-full flex-col items-start gap-0.5 rounded-xl px-3 py-2 pr-8 text-left transition-colors',
-                        isActive ? 'bg-surface-raised text-ink' : 'text-ink-muted hover:bg-surface-raised/60 hover:text-ink',
+                        isActive
+                          ? 'bg-surface-raised text-ink'
+                          : 'text-ink-muted hover:bg-surface-raised/60 hover:text-ink',
                       )}
                     >
                       <span className="w-full truncate text-[13px]">{session.title}</span>
@@ -144,8 +117,23 @@ export function Sidebar({
         </div>
       </div>
 
-      <div className="border-t border-line/70 px-4 py-3">
-        <div className="flex items-center gap-2">
+      <div className="border-t border-line/60 px-3 py-3">
+        <button
+          type="button"
+          onClick={() => onViewChange('settings')}
+          aria-current={view === 'settings' ? 'page' : undefined}
+          className={cn(
+            'flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-sm transition-colors',
+            view === 'settings'
+              ? 'bg-surface-raised text-ink'
+              : 'text-ink-muted hover:bg-surface-raised/60 hover:text-ink',
+          )}
+        >
+          <Settings className="h-4 w-4 shrink-0" aria-hidden="true" />
+          <span className="flex-1 text-left">Settings</span>
+        </button>
+
+        <div className="mt-2.5 flex items-center gap-2 px-3">
           <span
             className={cn(
               'h-1.5 w-1.5 shrink-0 rounded-full',
