@@ -13,6 +13,16 @@ export interface ServerDocument {
   error_message?: string | null
   conversation_id?: string | null
   conversation_ids?: string[]
+  processing_stage?: string | null
+  processing_started_at?: string | null
+  processing_completed_at?: string | null
+  last_error_stage?: string | null
+  chunk_count?: number | null
+  ocr_used?: boolean | null
+  file_type?: string | null
+  embedding_model?: string | null
+  embedding_dimensions?: number | null
+  stage_timings?: Record<string, number> | null
   created_at: string
   updated_at: string
 }

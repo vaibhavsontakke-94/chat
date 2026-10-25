@@ -21,7 +21,11 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     supabaseJwtSecret: TEST_SECRET,
     cronSecret: null,
     ragSimilarityThreshold: 0.2,
+    ragRelativeThreshold: 0.55,
     ragMaxContextChunks: 6,
+    ragCandidateCount: 30,
+    ragQuestionBatchSize: 5,
+    ragAnswerAllMaxQuestions: 25,
     ...overrides,
   }
 }

@@ -1,4 +1,4 @@
-import { timingSafeEqual } from 'node:crypto'
+import { createHash, timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AppConfig } from '../../config.ts'
 import { getAuthUser, getBearerToken } from '../../middleware/auth.ts'
@@ -12,7 +12,12 @@ import {
   resolveDocumentType,
 } from '../../lib/ingest/extract.ts'
 import { chunkPages } from '../../lib/ingest/chunker.ts'
-import { embedText } from '../../lib/ingest/embeddings.ts'
+import { getEmbeddingConfig, embedText } from '../../lib/ingest/embeddings.ts'
+import {
+  looksLikeQuestionPaper,
+  parseQuestionsFromPages,
+  type ParsedQuestion,
+} from '../../lib/ingest/questions.ts'
 import { isUuid } from '../../lib/validate.ts'
 import { ragDebug, ragDebugError, shortId } from '../../lib/rag/debug.ts'
 import { retrieveRelevantChunks } from '../../lib/rag/retrieve.ts'
@@ -54,6 +59,65 @@ interface DocumentRow {
   status: string
   conversation_id: string | null
   updated_at: string | null
+  content_hash: string | null
+  storage_path: string | null
+  file_type: string | null
+}
+
+function contentHash(buffer: Buffer): string {
+  return createHash('sha256').update(buffer).digest('hex')
+}
+
+async function updateProcessingStage(
+  supabase: DbClient,
+  documentId: string,
+  userId: string,
+  stage: string,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
+  try {
+    await (supabase.from('documents') as any)
+      .update({ processing_stage: stage, ...extra })
+      .eq('id', documentId)
+      .eq('user_id', userId)
+  } catch {
+    // Progress is advisory; a failed stage update must not abort indexing.
+  }
+}
+
+async function replaceDocumentQuestions(
+  supabase: DbClient,
+  documentId: string,
+  userId: string,
+  conversationId: string | null,
+  questions: ParsedQuestion[],
+): Promise<void> {
+  await (supabase.from('document_questions') as any)
+    .delete()
+    .eq('document_id', documentId)
+    .eq('user_id', userId)
+
+  if (questions.length === 0) return
+  const rows = questions.map((question) => ({
+    document_id: documentId,
+    user_id: userId,
+    conversation_id: conversationId,
+    question_number: question.question_number,
+    question_key: question.question_key,
+    question_text: question.question_text,
+    options: question.options,
+    marks: question.marks,
+    page_number: question.page_number,
+    section: question.section,
+    order_index: question.order_index,
+    metadata: { ...question.metadata, parent_key: question.parent_key },
+  }))
+
+  for (let index = 0; index < rows.length; index += 100) {
+    const batch = rows.slice(index, index + 100)
+    const { error } = await (supabase.from('document_questions') as any).insert(batch)
+    if (error) throw new Error(error.message)
+  }
 }
 
 async function getUserId(req: IncomingMessage, config: AppConfig): Promise<string | null> {
@@ -130,6 +194,46 @@ function parseMultipart(
   })
 }
 
+interface ExistingDocument {
+  id: string
+  status: string
+  updated_at: string | null
+  filename: string
+  content_hash: string | null
+}
+
+async function findExistingDocument(
+  supabase: DbClient,
+  userId: string,
+  hash: string,
+  filename: string,
+  size: number,
+): Promise<{ document: ExistingDocument | null; error: unknown }> {
+  const { data: byHash, error: hashError } = await (supabase.from('documents') as any)
+    .select('id,status,updated_at,filename,content_hash')
+    .eq('user_id', userId)
+    .eq('content_hash', hash)
+    .in('status', ['uploading', 'processing', 'completed', 'failed'])
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  if (hashError) return { document: null, error: hashError }
+  if (byHash) return { document: byHash as ExistingDocument, error: null }
+
+  const { data: byName, error: nameError } = await (supabase.from('documents') as any)
+    .select('id,status,updated_at,filename,content_hash')
+    .eq('user_id', userId)
+    .eq('filename', filename)
+    .eq('size_bytes', size)
+    .in('status', ['uploading', 'processing', 'completed', 'failed'])
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+
+  return { document: (byName as ExistingDocument | null) ?? null, error: nameError }
+}
+
 function errorMessage(error: unknown): string {
   if (error instanceof HttpError || error instanceof DocumentExtractionError) {
     return error.message
@@ -145,10 +249,17 @@ async function markDocumentFailed(
   documentId: string,
   userId: string,
   message: string,
+  stage: string | null = null,
 ): Promise<void> {
   try {
     await (supabase.from('documents') as any)
-      .update({ status: 'failed', error_message: message.slice(0, 500) })
+      .update({
+        status: 'failed',
+        error_message: message.slice(0, 500),
+        processing_stage: 'failed',
+        ...(stage ? { last_error_stage: stage } : {}),
+        processing_completed_at: new Date().toISOString(),
+      })
       .eq('id', documentId)
       .eq('user_id', userId)
   } catch {
@@ -163,6 +274,10 @@ async function removeDocumentChunks(
 ): Promise<void> {
   try {
     await supabase.from('document_chunks').delete().eq('document_id', documentId).eq('user_id', userId)
+    await (supabase.from('document_questions') as any)
+      .delete()
+      .eq('document_id', documentId)
+      .eq('user_id', userId)
   } catch {
     // Cleanup is best effort; the status update reports the real failure.
   }
@@ -214,109 +329,195 @@ async function indexDocument(input: IndexDocumentInput): Promise<{ chunks: numbe
   const { config, supabase, documentId, userId, conversationId, filename, contentType, buffer } =
     input
 
-  let extracted
+  const timings: Record<string, number> = {}
+  const startedAt = Date.now()
+  let stage = 'extracting'
+
   try {
-    extracted = await extractDocument({ buffer, filename, contentType })
-  } catch (error) {
-    if (error instanceof DocumentExtractionError) {
-      throw new HttpError(422, error.code, error.message)
-    }
-    throw new HttpError(
-      422,
-      'extract_failed',
-      'Failed to extract text from the document. It may be corrupted, encrypted, or unsupported.',
-    )
-  }
-
-  if (extracted.kind === 'pdf' && extracted.numpages > MAX_PAGES) {
-    throw new HttpError(422, 'too_many_pages', `PDF has too many pages (max ${MAX_PAGES}).`)
-  }
-
-  ragDebug('document.extracted', {
-    document: shortId(documentId),
-    kind: extracted.kind,
-    pages: extracted.numpages,
-    text_length: extracted.text.length,
-  })
-
-  const pages =
-    extracted.pages.length > 0 ? extracted.pages : [{ pageNumber: 1, text: extracted.text }]
-  const chunks = chunkPages(pages, { chunkSize: 1000, overlap: 200 })
-  if (chunks.length === 0 || extracted.text.trim().length === 0) {
-    throw new HttpError(
-      422,
-      'empty_document',
-      extracted.kind === 'image'
-        ? 'No readable text was found in this image.'
-        : 'No extractable text found in this document.',
-    )
-  }
-
-  ragDebug('document.chunked', {
-    document: shortId(documentId),
-    chunks: chunks.length,
-    first_chunk_length: chunks[0]?.content.length ?? 0,
-  })
-
-  const texts = chunks.map((chunk) => chunk.content)
-  const embeddings = await embedText(texts, config, { taskType: 'document' })
-  if (embeddings.length !== chunks.length) {
-    throw new Error('The embedding service returned an unexpected number of vectors.')
-  }
-  ragDebug('document.embedded', {
-    document: shortId(documentId),
-    vectors: embeddings.length,
-    dimensions: embeddings[0]?.length ?? 0,
-  })
-
-  const rows = chunks.map((chunk, index) => ({
-    document_id: documentId,
-    user_id: userId,
-    conversation_id: conversationId,
-    chunk_index: chunk.index,
-    page_number: chunk.pageNumber,
-    content: chunk.content,
-    embedding: embeddings[index],
-    metadata: {
-      filename,
-      page_number: chunk.pageNumber,
-      chunk_index: chunk.index,
-    },
-  }))
-
-  // Reindexing replaces the previous vectors for this document.
-  const { error: deleteErr } = await supabase
-    .from('document_chunks')
-    .delete()
-    .eq('document_id', documentId)
-    .eq('user_id', userId)
-  if (deleteErr) throw new Error(deleteErr.message)
-
-  const batchSize = 50
-  for (let i = 0; i < rows.length; i += batchSize) {
-    const batch = rows.slice(i, i + batchSize)
-    const { error: insErr } = await (supabase.from('document_chunks') as any).insert(batch)
-    if (insErr) throw new Error(insErr.message)
-  }
-
-  const { error: completedErr } = await (supabase.from('documents') as any)
-    .update({
-      status: 'completed',
-      page_count: extracted.numpages,
-      error_message: null,
+    await updateProcessingStage(supabase, documentId, userId, stage, {
+      processing_started_at: new Date().toISOString(),
     })
-    .eq('id', documentId)
-    .eq('user_id', userId)
-  if (completedErr) throw new Error(completedErr.message)
 
-  ragDebug('document.completed', {
-    document: shortId(documentId),
-    conversation: shortId(conversationId),
-    chunks: chunks.length,
-    pages: extracted.numpages,
-  })
+    let extracted
+    try {
+      extracted = await extractDocument({ buffer, filename, contentType })
+    } catch (error) {
+      if (error instanceof DocumentExtractionError) {
+        throw new HttpError(422, error.code, error.message)
+      }
+      throw new HttpError(
+        422,
+        'extract_failed',
+        'Failed to extract text from the document. It may be corrupted, encrypted, or unsupported.',
+      )
+    }
+    timings.extract_ms = Date.now() - startedAt
 
-  return { chunks: chunks.length, pages: extracted.numpages }
+    if (extracted.kind === 'pdf' && extracted.numpages > MAX_PAGES) {
+      throw new HttpError(422, 'too_many_pages', `PDF has too many pages (max ${MAX_PAGES}).`)
+    }
+
+    ragDebug('document.extracted', {
+      document: shortId(documentId),
+      kind: extracted.kind,
+      pages: extracted.numpages,
+      text_length: extracted.text.length,
+      ocr: extracted.ocrUsed,
+    })
+
+    const pages =
+      extracted.pages.length > 0 ? extracted.pages : [{ pageNumber: 1, text: extracted.text }]
+
+    stage = 'chunking'
+    await updateProcessingStage(supabase, documentId, userId, stage)
+    const chunkStart = Date.now()
+    const chunks = chunkPages(pages, { chunkSize: 1000, overlap: 200 })
+    if (chunks.length === 0 || extracted.text.trim().length === 0) {
+      throw new HttpError(
+        422,
+        'empty_document',
+        extracted.kind === 'image'
+          ? 'No readable text was found in this image.'
+          : 'No extractable text found in this document.',
+      )
+    }
+    timings.chunk_ms = Date.now() - chunkStart
+    timings.chunk_count = chunks.length
+
+    ragDebug('document.chunked', {
+      document: shortId(documentId),
+      chunks: chunks.length,
+      first_chunk_length: chunks[0]?.content.length ?? 0,
+    })
+
+    stage = 'questions'
+    await updateProcessingStage(supabase, documentId, userId, stage)
+    const questionStart = Date.now()
+    const parsedQuestions = parseQuestionsFromPages(pages)
+    const questionPaper = looksLikeQuestionPaper(pages, parsedQuestions)
+    timings.question_ms = Date.now() - questionStart
+    timings.question_count = questionPaper ? parsedQuestions.length : 0
+
+    stage = 'embedding'
+    await updateProcessingStage(supabase, documentId, userId, stage)
+    const embeddingStart = Date.now()
+    const texts = chunks.map((chunk) => chunk.content)
+    const embeddingConfig = getEmbeddingConfig()
+    const embeddings = await embedText(texts, config, { taskType: 'document' })
+    if (embeddings.length !== chunks.length) {
+      throw new Error('The embedding service returned an unexpected number of vectors.')
+    }
+    const dimensions = embeddings[0]?.length ?? 0
+    if (dimensions !== embeddingConfig.dimensions) {
+      throw new Error(
+        `The embedding provider returned ${dimensions}-dimension vectors, but ${embeddingConfig.dimensions} are required.`,
+      )
+    }
+    timings.embed_ms = Date.now() - embeddingStart
+
+    ragDebug('document.embedded', {
+      document: shortId(documentId),
+      vectors: embeddings.length,
+      dimensions,
+      provider: embeddingConfig.provider,
+      model: embeddingConfig.model,
+    })
+
+    const rows = chunks.map((chunk, index) => ({
+      document_id: documentId,
+      user_id: userId,
+      conversation_id: conversationId,
+      chunk_index: chunk.index,
+      page_number: chunk.pageNumber,
+      content: chunk.content,
+      embedding: embeddings[index],
+      embedding_model: embeddingConfig.model,
+      embedding_dimensions: dimensions,
+      metadata: {
+        filename,
+        page_number: chunk.pageNumber,
+        chunk_index: chunk.index,
+        embedding_provider: embeddingConfig.provider,
+        embedding_revision: embeddingConfig.revision,
+      },
+    }))
+
+    stage = 'saving'
+    await updateProcessingStage(supabase, documentId, userId, stage)
+    const saveStart = Date.now()
+
+    // Reindexing replaces the previous vectors for this document.
+    const { error: deleteErr } = await supabase
+      .from('document_chunks')
+      .delete()
+      .eq('document_id', documentId)
+      .eq('user_id', userId)
+    if (deleteErr) throw new Error(deleteErr.message)
+
+    const batchSize = 50
+    for (let i = 0; i < rows.length; i += batchSize) {
+      const batch = rows.slice(i, i + batchSize)
+      const { error: insErr } = await (supabase.from('document_chunks') as any).insert(batch)
+      if (insErr) throw new Error(insErr.message)
+    }
+
+    if (questionPaper && parsedQuestions.length > 0) {
+      try {
+        await replaceDocumentQuestions(
+          supabase,
+          documentId,
+          userId,
+          conversationId,
+          parsedQuestions,
+        )
+      } catch (error) {
+        ragDebugError('document.questions_failed', error)
+      }
+    }
+
+    timings.save_ms = Date.now() - saveStart
+    timings.total_ms = Date.now() - startedAt
+
+    const { error: completedErr } = await (supabase.from('documents') as any)
+      .update({
+        status: 'completed',
+        page_count: extracted.numpages,
+        chunk_count: chunks.length,
+        embedding_model: embeddingConfig.model,
+        embedding_dimensions: dimensions,
+        ocr_used: extracted.ocrUsed,
+        file_type: extracted.kind,
+        stage_timings: timings,
+        processing_stage: 'ready',
+        processing_completed_at: new Date().toISOString(),
+        last_error_stage: null,
+        error_message: null,
+      })
+      .eq('id', documentId)
+      .eq('user_id', userId)
+    if (completedErr) throw new Error(completedErr.message)
+
+    ragDebug('document.completed', {
+      document: shortId(documentId),
+      conversation: shortId(conversationId),
+      chunks: chunks.length,
+      pages: extracted.numpages,
+      questions: questionPaper ? parsedQuestions.length : 0,
+      total_ms: timings.total_ms,
+    })
+
+    return { chunks: chunks.length, pages: extracted.numpages }
+  } catch (error) {
+    const activeStage = error instanceof HttpError && error.code === 'too_many_pages' ? 'extracting' : stage
+    await markDocumentFailed(
+      supabase,
+      documentId,
+      userId,
+      errorMessage(error),
+      activeStage,
+    )
+    throw error
+  }
 }
 
 interface ProcessJob {
@@ -339,7 +540,12 @@ async function claimDocument(job: ProcessJob): Promise<boolean> {
   if (!job.claim) return true
 
   let query = (job.supabase.from('documents') as any)
-    .update({ status: 'processing', error_message: null })
+    .update({
+      status: 'processing',
+      error_message: null,
+      processing_stage: 'queued',
+      processing_started_at: new Date().toISOString(),
+    })
     .eq('id', job.documentId)
     .eq('user_id', job.userId)
 
@@ -573,24 +779,21 @@ export async function handleDocuments(
       }
 
       const replace = parsed.fields.replace === 'true' || parsed.fields.replace === '1'
+      const hash = contentHash(file.buffer)
 
-      const { data: existing, error: existingErr } = await (supabase.from('documents') as any)
-        .select('id,status,updated_at,filename')
-        .eq('user_id', userId)
-        .eq('filename', file.filename)
-        .eq('size_bytes', file.buffer.length)
-        .in('status', ['uploading', 'processing', 'completed', 'failed'])
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle()
-      if (existingErr) {
+      const existingResult = await findExistingDocument(
+        supabase,
+        userId,
+        hash,
+        file.filename,
+        file.buffer.length,
+      )
+      if (existingResult.error) {
         sendError(res, new HttpError(500, 'db_error', 'Failed to check for duplicate documents.'))
         return
       }
 
-      const existingDoc = existing as
-        | { id: string; status: string; updated_at: string | null; filename: string }
-        | null
+      const existingDoc = existingResult.document
       const existingAge = existingDoc?.updated_at ? Date.now() - Date.parse(existingDoc.updated_at) : 0
       const staleProcessing =
         existingDoc?.status === 'processing' && existingAge > STALE_PROCESSING_MS
@@ -643,6 +846,10 @@ export async function handleDocuments(
           status: 'uploading',
           error_message: null,
           conversation_id: conversationId,
+          content_hash: hash,
+          file_type: fileType.kind,
+          processing_stage: 'uploaded',
+          attempt_count: 0,
         } as any)
         .select('id')
         .single()
@@ -662,6 +869,10 @@ export async function handleDocuments(
       }
 
       const objectPath = documentObjectPath(userId, docId, file.filename)
+      await (supabase.from('documents') as any)
+        .update({ storage_path: objectPath })
+        .eq('id', docId)
+        .eq('user_id', userId)
       try {
         await uploadDocumentObject(config, supabase, objectPath, file.buffer, contentType)
       } catch (error) {
@@ -713,7 +924,7 @@ export async function handleDocuments(
     const { data, error } = await supabase
       .from('documents')
       .select(
-        'id,filename,mime_type,size_bytes,page_count,status,error_message,conversation_id,created_at,updated_at',
+        'id,filename,mime_type,size_bytes,page_count,chunk_count,status,error_message,conversation_id,created_at,updated_at,processing_stage,processing_started_at,processing_completed_at,last_error_stage,ocr_used,stage_timings,file_type,embedding_model,embedding_dimensions',
       )
       .eq('user_id', userId)
       .order('created_at', { ascending: false })

@@ -1,6 +1,16 @@
 import type { AppConfig } from '../../config.ts'
 
 export const EMBEDDING_DIMENSIONS = 768
+export const EMBEDDING_REVISION = 'v1-768'
+
+export type EmbeddingProvider = 'ollama' | 'openai' | 'huggingface' | 'google' | 'local'
+
+export interface EmbeddingConfig {
+  provider: EmbeddingProvider
+  model: string
+  dimensions: number
+  revision: string
+}
 
 function readEnv(name: string): string | undefined {
   const value = process.env[name]
@@ -9,19 +19,18 @@ function readEnv(name: string): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined
 }
 
-export function getOllamaBaseUrl(_config: AppConfig): string {
+export function getOllamaBaseUrl(_config?: AppConfig): string {
   return readEnv('OLLAMA_BASE_URL') ?? 'http://localhost:11434'
 }
 
-export function getEmbedModel(_config: AppConfig): string {
+export function getEmbedModel(_config?: AppConfig): string {
   return readEnv('OLLAMA_EMBED_MODEL') ?? readEnv('GROQ_EMBED_MODEL') ?? 'nomic-embed-text'
 }
-
-type EmbeddingProvider = 'ollama' | 'openai' | 'huggingface' | 'google' | 'local'
 
 const HF_DEFAULT_MODEL = 'sentence-transformers/all-MiniLM-L6-v2'
 const GOOGLE_DEFAULT_MODEL = 'gemini-embedding-001'
 const GOOGLE_DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
+const LOCAL_MODEL = 'local-hash-v1'
 
 function getEmbeddingProvider(): EmbeddingProvider {
   const configured = readEnv('EMBEDDINGS_PROVIDER')?.toLowerCase()
@@ -53,6 +62,27 @@ function getEmbeddingProvider(): EmbeddingProvider {
   return 'local'
 }
 
+export function getEmbeddingConfig(): EmbeddingConfig {
+  const provider = getEmbeddingProvider()
+  const model =
+    provider === 'google'
+      ? (readEnv('GEMINI_EMBEDDING_MODEL') ?? GOOGLE_DEFAULT_MODEL).replace(/^models\//, '')
+      : provider === 'huggingface'
+        ? (readEnv('HF_EMBEDDING_MODEL') ?? HF_DEFAULT_MODEL)
+        : provider === 'openai'
+          ? (readEnv('EMBEDDINGS_MODEL') ?? 'text-embedding-3-small')
+          : provider === 'ollama'
+            ? getEmbedModel()
+            : LOCAL_MODEL
+
+  return {
+    provider,
+    model,
+    dimensions: EMBEDDING_DIMENSIONS,
+    revision: `${provider}:${model}:${EMBEDDING_REVISION}`,
+  }
+}
+
 type EmbeddingOptions = {
   allowPadding?: boolean
   normalize?: boolean
@@ -60,6 +90,74 @@ type EmbeddingOptions = {
 
 export interface EmbedTextOptions {
   taskType?: 'document' | 'query'
+}
+
+const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504])
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function retryDelayMs(response: Response | null, attempt: number): number {
+  if (response) {
+    const retryAfter = Number(response.headers.get('retry-after'))
+    if (Number.isFinite(retryAfter) && retryAfter > 0) {
+      return Math.min(retryAfter * 1000, 30_000)
+    }
+  }
+  return Math.min(750 * 2 ** attempt + Math.floor(Math.random() * 250), 15_000)
+}
+
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  label: string,
+  attempts = 4,
+): Promise<Response> {
+  let lastResponse: Response | null = null
+  let lastError: Error | null = null
+
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const response = await fetch(url, {
+        ...init,
+        signal: init.signal ?? AbortSignal.timeout(60_000),
+      })
+      if (response.ok) return response
+      lastResponse = response
+      if (!RETRYABLE_STATUS.has(response.status) || attempt === attempts - 1) return response
+      await sleep(retryDelayMs(response, attempt))
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error))
+      if (attempt === attempts - 1) break
+      await sleep(retryDelayMs(null, attempt))
+    }
+  }
+
+  if (lastResponse) return lastResponse
+  throw new Error(
+    `Could not reach ${label} for embeddings after ${attempts} attempts. ` +
+      `Check connectivity and provider configuration.` +
+      (lastError ? ` (${lastError.name})` : ''),
+  )
+}
+
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  task: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length)
+  let cursor = 0
+  const workers = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
+    for (;;) {
+      const index = cursor++
+      if (index >= items.length) return
+      results[index] = await task(items[index] as T, index)
+    }
+  })
+  await Promise.all(workers)
+  return results
 }
 
 function normalizeVector(vector: number[]): number[] {
@@ -85,7 +183,7 @@ function assertEmbedding(
   if (value.length > EMBEDDING_DIMENSIONS) {
     throw new Error(
       `${provider} returned ${value.length}-dimension embeddings, but this database expects ${EMBEDDING_DIMENSIONS}. ` +
-        `Use a model with at most ${EMBEDDING_DIMENSIONS} dimensions or update the vector column in the RAG migration.`,
+        `Use a model with ${EMBEDDING_DIMENSIONS} dimensions or update the vector column in the RAG migration.`,
     )
   }
   if (value.length < EMBEDDING_DIMENSIONS && !options.allowPadding) {
@@ -97,8 +195,6 @@ function assertEmbedding(
 
   let vector = value
   if (vector.length < EMBEDDING_DIMENSIONS) {
-    // MiniLM-style models return 384 dimensions. Appending zeros preserves
-    // cosine similarity while keeping compatibility with vector(768).
     vector = [...vector, ...new Array<number>(EMBEDDING_DIMENSIONS - vector.length).fill(0)]
   }
   return options.normalize ? normalizeVector(vector) : vector
@@ -155,45 +251,29 @@ async function embedWithHuggingFace(texts: string[]): Promise<number[][]> {
     Number.isFinite(parsedBatchSize) && parsedBatchSize > 0
       ? Math.min(parsedBatchSize, 64)
       : 32
-  const results: number[][] = []
 
+  const batches: Array<{ start: number; batch: string[] }> = []
   for (let start = 0; start < texts.length; start += batchSize) {
-    const batch = texts.slice(start, start + batchSize)
-    let response: Response | undefined
+    batches.push({ start, batch: texts.slice(start, start + batchSize) })
+  }
 
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        response = await fetch(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            inputs: batch,
-            options: { wait_for_model: true },
-          }),
-          signal: AbortSignal.timeout(60_000),
-        })
-      } catch {
-        throw new Error(
-          `Could not reach Hugging Face at ${url} for embeddings. Check HF_EMBEDDINGS_URL or try again.`,
-        )
-      }
+  const batchResults = await mapLimit(batches, 2, async ({ batch }) => {
+    const response = await fetchWithRetry(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          inputs: batch,
+          options: { wait_for_model: true },
+        }),
+      },
+      'Hugging Face',
+    )
 
-      if ((response.status === 429 || response.status === 503) && attempt < 2) {
-        const retryAfter = Number(response.headers.get('retry-after'))
-        const delay =
-          Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 2000
-        await new Promise((resolve) => setTimeout(resolve, delay))
-        continue
-      }
-      break
-    }
-
-    if (!response) {
-      throw new Error('Hugging Face embeddings failed without a response.')
-    }
     if (!response.ok) {
       const detail = await response.text().catch(() => '')
       if (response.status === 401 || response.status === 403) {
@@ -212,17 +292,15 @@ async function embedWithHuggingFace(texts: string[]): Promise<number[][]> {
     if (rows.length !== batch.length) {
       throw new Error('Hugging Face returned an unexpected number of embedding vectors.')
     }
-    results.push(
-      ...rows.map((row) =>
-        assertEmbedding(row, `Hugging Face (${model})`, {
-          allowPadding: true,
-          normalize: true,
-        }),
-      ),
+    return rows.map((row) =>
+      assertEmbedding(row, `Hugging Face (${model})`, {
+        allowPadding: true,
+        normalize: true,
+      }),
     )
-  }
+  })
 
-  return results
+  return batchResults.flat()
 }
 
 function getGoogleApiKey(): string | undefined {
@@ -260,50 +338,33 @@ async function embedWithGoogle(
     Number.isFinite(parsedBatchSize) && parsedBatchSize > 0
       ? Math.min(parsedBatchSize, 100)
       : 100
-  const results: number[][] = []
 
+  const batches: Array<{ batch: string[] }> = []
   for (let start = 0; start < texts.length; start += batchSize) {
-    const batch = texts.slice(start, start + batchSize)
-    let response: Response | undefined
+    batches.push({ batch: texts.slice(start, start + batchSize) })
+  }
 
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        response = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'x-goog-api-key': apiKey,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            requests: batch.map((text) => ({
-              model: `models/${model}`,
-              content: { parts: [{ text }] },
-              taskType: googleTaskType,
-              outputDimensionality: EMBEDDING_DIMENSIONS,
-            })),
-          }),
-          signal: AbortSignal.timeout(60_000),
-        })
-      } catch {
-        throw new Error(
-          `Could not reach the Gemini API at ${getGoogleApiBaseUrl()} for embeddings. ` +
-            'Check GEMINI_API_BASE_URL or try again.',
-        )
-      }
+  const batchResults = await mapLimit(batches, 2, async ({ batch }) => {
+    const response = await fetchWithRetry(
+      url,
+      {
+        method: 'POST',
+        headers: {
+          'x-goog-api-key': apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          requests: batch.map((text) => ({
+            model: `models/${model}`,
+            content: { parts: [{ text }] },
+            taskType: googleTaskType,
+            outputDimensionality: EMBEDDING_DIMENSIONS,
+          })),
+        }),
+      },
+      'the Gemini API',
+    )
 
-      if ((response.status === 429 || response.status === 503) && attempt < 2) {
-        const retryAfter = Number(response.headers.get('retry-after'))
-        const delay =
-          Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 2000
-        await new Promise((resolve) => setTimeout(resolve, delay))
-        continue
-      }
-      break
-    }
-
-    if (!response) {
-      throw new Error('Gemini embeddings failed without a response.')
-    }
     if (!response.ok) {
       const detail = await response.text().catch(() => '')
       if (response.status === 401 || response.status === 403) {
@@ -311,6 +372,12 @@ async function embedWithGoogle(
           `Google Gemini rejected the API key (${response.status}). Use a Google AI Studio key ` +
             'with access to the Gemini API, or set EMBEDDINGS_PROVIDER=local.' +
             (detail ? ` ${detail.slice(0, 200)}` : ''),
+        )
+      }
+      if (response.status === 429) {
+        throw new Error(
+          'Gemini embedding rate limit or quota exceeded. The request was retried with backoff; ' +
+            'reduce GEMINI_EMBEDDING_BATCH_SIZE or try again later.',
         )
       }
       throw new Error(
@@ -325,35 +392,28 @@ async function embedWithGoogle(
     if (rows.length !== batch.length) {
       throw new Error('Gemini returned an unexpected number of embedding vectors.')
     }
-    results.push(
-      ...rows.map((row) =>
-        assertEmbedding(row.values, `Google Gemini (${model})`, { normalize: true }),
-      ),
+    return rows.map((row) =>
+      assertEmbedding(row.values, `Google Gemini (${model})`, { normalize: true }),
     )
-  }
+  })
 
-  return results
+  return batchResults.flat()
 }
 
 async function embedWithOllama(texts: string[], config: AppConfig): Promise<number[][]> {
   const baseUrl = getOllamaBaseUrl(config)
   const model = getEmbedModel(config)
-  const results: number[][] = []
 
-  for (const text of texts) {
-    let response: Response
-    try {
-      response = await fetch(`${baseUrl}/api/embeddings`, {
+  return mapLimit(texts, 2, async (text) => {
+    const response = await fetchWithRetry(
+      `${baseUrl}/api/embeddings`,
+      {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model, prompt: text }),
-      })
-    } catch {
-      throw new Error(
-        `Could not reach Ollama at ${baseUrl} for embeddings. Start Ollama, set OLLAMA_BASE_URL, ` +
-          'or set EMBEDDINGS_PROVIDER=local.',
-      )
-    }
+      },
+      'Ollama',
+    )
     if (!response.ok) {
       const detail = await response.text().catch(() => '')
       throw new Error(
@@ -361,10 +421,8 @@ async function embedWithOllama(texts: string[], config: AppConfig): Promise<numb
       )
     }
     const json = (await response.json()) as { embedding?: unknown }
-    results.push(assertEmbedding(json.embedding, 'Ollama'))
-  }
-
-  return results
+    return assertEmbedding(json.embedding, 'Ollama')
+  })
 }
 
 async function embedWithOpenAiCompatible(texts: string[]): Promise<number[][]> {
@@ -376,40 +434,58 @@ async function embedWithOpenAiCompatible(texts: string[]): Promise<number[][]> {
     )
   }
   const model = readEnv('EMBEDDINGS_MODEL') ?? 'text-embedding-3-small'
+  const parsedBatchSize = Number.parseInt(readEnv('EMBEDDINGS_BATCH_SIZE') ?? '', 10)
+  const batchSize =
+    Number.isFinite(parsedBatchSize) && parsedBatchSize > 0
+      ? Math.min(parsedBatchSize, 64)
+      : 64
 
-  let response: Response
-  try {
-    response = await fetch(apiUrl, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
+  const batches: Array<{ start: number; batch: string[] }> = []
+  for (let start = 0; start < texts.length; start += batchSize) {
+    batches.push({ start, batch: texts.slice(start, start + batchSize) })
+  }
+
+  const batchResults = await mapLimit(batches, 2, async ({ batch }) => {
+    const response = await fetchWithRetry(
+      apiUrl,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          input: batch,
+          dimensions: EMBEDDING_DIMENSIONS,
+          encoding_format: 'float',
+        }),
       },
-      body: JSON.stringify({
-        model,
-        input: texts,
-        dimensions: EMBEDDING_DIMENSIONS,
-        encoding_format: 'float',
-      }),
-    })
-  } catch {
-    throw new Error('Could not reach the embedding API. Check EMBEDDINGS_API_URL.')
-  }
-  if (!response.ok) {
-    const detail = await response.text().catch(() => '')
-    throw new Error(
-      `Embedding API failed (${response.status})${detail ? `: ${detail.slice(0, 300)}` : '.'}`,
+      'the embedding API',
     )
-  }
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '')
+      if (response.status === 401 || response.status === 403) {
+        throw new Error(`The embedding API rejected the API key (${response.status}).`)
+      }
+      throw new Error(
+        `Embedding API failed (${response.status})${detail ? `: ${detail.slice(0, 300)}` : '.'}`,
+      )
+    }
 
-  const json = (await response.json()) as { data?: Array<{ index?: number; embedding?: unknown }> }
-  const rows = Array.isArray(json.data)
-    ? [...json.data].sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
-    : []
-  if (rows.length !== texts.length) {
-    throw new Error('The embedding API returned an unexpected number of vectors.')
-  }
-  return rows.map((row) => assertEmbedding(row.embedding, 'The embedding API'))
+    const json = (await response.json()) as {
+      data?: Array<{ index?: number; embedding?: unknown }>
+    }
+    const rows = Array.isArray(json.data)
+      ? [...json.data].sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
+      : []
+    if (rows.length !== batch.length) {
+      throw new Error('The embedding API returned an unexpected number of vectors.')
+    }
+    return rows.map((row) => assertEmbedding(row.embedding, 'The embedding API'))
+  })
+
+  return batchResults.flat()
 }
 
 function fnv1a(value: string): number {
@@ -428,11 +504,6 @@ function addFeature(vector: Float64Array, feature: string, weight: number): void
   vector[index] += sign * weight
 }
 
-/**
- * Deterministic offline embedding used when no embedding service is configured.
- * It is lexical (hashed words and character trigrams), not semantic, but keeps
- * document ingestion and retrieval working on hosts where Ollama cannot run.
- */
 function localEmbedding(text: string): number[] {
   const vector = new Float64Array(EMBEDDING_DIMENSIONS)
   const tokens = text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []

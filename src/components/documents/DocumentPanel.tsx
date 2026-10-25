@@ -21,6 +21,38 @@ export interface DocumentPanelProps {
 
 const ACCEPT_ATTRIBUTE = ACCEPTED_EXTENSIONS.join(',')
 
+const STAGE_LABELS: Record<string, string> = {
+  uploaded: 'Uploaded',
+  queued: 'Queued',
+  extracting: 'Reading text',
+  chunking: 'Splitting into chunks',
+  questions: 'Finding questions',
+  embedding: 'Creating embeddings',
+  saving: 'Saving index',
+  ready: 'Ready',
+  failed: 'Failed',
+}
+
+function documentStatusLabel(doc: any): string {
+  if (doc.status === 'completed') return 'Ready'
+  if (doc.status === 'failed') {
+    return doc.last_error_stage
+      ? `Failed during ${STAGE_LABELS[doc.last_error_stage] ?? doc.last_error_stage}`
+      : 'Failed'
+  }
+  if (doc.status === 'uploading') return 'Uploading'
+  const stage = typeof doc.processing_stage === 'string' ? doc.processing_stage : 'processing'
+  return STAGE_LABELS[stage] ?? 'Processing'
+}
+
+function documentStatusDetail(doc: any): string | null {
+  if (doc.status === 'completed' && doc.chunk_count) {
+    return `${doc.chunk_count} chunks indexed`
+  }
+  if (doc.status === 'failed' && doc.error_message) return String(doc.error_message)
+  return null
+}
+
 export function DocumentPanel({
   documents,
   onFiles,
@@ -165,7 +197,7 @@ export function DocumentPanel({
           <p className="px-4 py-3 text-xs text-danger">{uploadError}</p>
         ) : null}
         {serverDocuments.length === 0 && !uploading ? (
-          <p className="px-4 py-8 text-center text-xs text-ink-subtle">No PDFs uploaded yet.</p>
+          <p className="px-4 py-8 text-center text-xs text-ink-subtle">No documents uploaded yet.</p>
         ) : (
           <ul className="divide-y divide-line/70">
             {serverDocuments.map((doc: any) => (
@@ -176,7 +208,8 @@ export function DocumentPanel({
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm text-ink">{doc.filename}</p>
                   <p className="text-[11px] text-ink-subtle">
-                    Status: {doc.status}
+                    {documentStatusLabel(doc)}
+                    {documentStatusDetail(doc) ? ` · ${documentStatusDetail(doc)}` : ''}
                     {doc.page_count ? ` · ${doc.page_count} pages` : ''}
                     {doc.size_bytes ? ` · ${formatFileSize(doc.size_bytes)}` : ''}
                   </p>

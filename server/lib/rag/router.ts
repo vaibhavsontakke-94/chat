@@ -33,21 +33,35 @@ export function expandVagueDocumentQuestion(question: string): string {
   return `${trimmed} What is this document about? Summarize its main topics and key details from the excerpts.`
 }
 
+const GENERAL_KNOWLEDGE_PATTERNS = [
+  /\bcapital (?:of|city)\b/i,
+  /\bwho (?:wrote|invented|discovered|won)\b/i,
+  /\b(?:current|today'?s?) (?:time|date|weather|news|price|president|prime minister)\b/i,
+  /\b(?:weather|temperature) (?:in|today|tomorrow)\b/i,
+  /\btranslate .* (?:to|into) \b/i,
+  /\b(?:write|generate|fix|debug) (?:me )?(?:a |some |this )?(?:code|program|function|script|poem|joke|email|essay)\b/i,
+  /\bwhat is the meaning of life\b/i,
+  /\bwho are you\b/i,
+]
+
 export function fallbackMode(
   question: string,
   documentCount: number,
   relevantChunks: number,
 ): ChatMode {
   if (documentCount === 0) return 'general'
+  if (looksDocumentSpecific(question)) return 'document'
+  if (GENERAL_KNOWLEDGE_PATTERNS.some((pattern) => pattern.test(question))) return 'general'
   if (relevantChunks > 0) return 'document'
-  return looksDocumentSpecific(question) ? 'document' : 'general'
+  return 'general'
 }
 
 function parseMode(value: string): ChatMode | null {
   const normalized = value.toLowerCase()
-  if (/\bmixed\b/.test(normalized)) return 'mixed'
-  if (/\bdocument\b/.test(normalized)) return 'document'
-  if (/\bgeneral\b/.test(normalized)) return 'general'
+  const matches = normalized.match(/\b(mixed|document|general)\b/g)
+  if (!matches || matches.length === 0) return null
+  const last = matches[matches.length - 1] as string
+  if (last === 'mixed' || last === 'document' || last === 'general') return last
   return null
 }
 
@@ -58,6 +72,8 @@ export async function classifyQuestion(input: {
   chunks: RetrievedChunk[]
   signal: AbortSignal
 }): Promise<ChatMode> {
+  if (input.documentNames.length === 0) return 'general'
+
   const attachments = input.documentNames
     .slice(0, 20)
     .map((name) => `- ${sanitizeForPrompt(name).replace(/\s+/g, ' ')}`)
@@ -102,10 +118,14 @@ ${input.question}`
         { role: 'user', content: prompt },
       ],
       temperature: 0,
-      maxTokens: 8,
+      maxTokens: 256,
+      reasoningEffort: 'low',
     },
     input.signal,
   )
 
-  return parseMode(answer) ?? 'general'
+  return (
+    parseMode(answer) ??
+    fallbackMode(input.question, input.documentNames.length, input.chunks.length)
+  )
 }

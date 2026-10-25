@@ -7,8 +7,25 @@ import { clientIp, isOriginAllowed, openSse, readJsonBody, sendError } from '../
 import { consumeRateLimit } from '../lib/rateLimit.ts'
 import { isUuid, validateChatRequest, type ChatRequest } from '../lib/validate.ts'
 import { getAuthUser, getBearerToken } from '../middleware/auth.ts'
-import { retrieveRelevantChunks, type RetrievedChunk } from '../lib/rag/retrieve.ts'
-import { buildRagPrompt, type RagCitation } from '../lib/rag/prompt.ts'
+import {
+  filterRetrievedChunks,
+  retrieveRelevantChunks,
+  type RetrievedChunk,
+} from '../lib/rag/retrieve.ts'
+import {
+  buildQuestionPaperPrompt,
+  buildRagPrompt,
+  type RagCitation,
+  type RagQuestion,
+} from '../lib/rag/prompt.ts'
+import {
+  batchQuestions,
+  loadDocumentQuestions,
+  questionSearchText,
+  selectQuestions,
+  type DocumentQuestion,
+} from '../lib/rag/questions.ts'
+import { getUserSupabase } from '../lib/supabase/user.ts'
 import {
   classifyQuestion,
   expandVagueDocumentQuestion,
@@ -56,6 +73,99 @@ async function streamResponse(
   } finally {
     res.off('close', abort)
     sse.close()
+  }
+}
+
+interface PreparedAnswer {
+  prompt: string
+  citations: RagCitation[]
+}
+
+async function streamPreparedAnswers(
+  res: ServerResponse,
+  config: AppConfig,
+  request: ChatRequest,
+  prepared: PreparedAnswer[],
+): Promise<void> {
+  const sse = openSse(res)
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  res.on('close', abort)
+
+  const systemMessages = request.messages.filter((message) => message.role === 'system')
+  const citations: RagCitation[] = []
+  const seenCitations = new Set<string>()
+  for (const answer of prepared) {
+    for (const citation of answer.citations) {
+      if (seenCitations.has(citation.chunk_id)) continue
+      seenCitations.add(citation.chunk_id)
+      citations.push(citation)
+    }
+  }
+
+  try {
+    sse.event('citations', {
+      citations,
+      found: citations.length > 0,
+      mode: 'document',
+    })
+
+    for (let index = 0; index < prepared.length; index++) {
+      if (controller.signal.aborted) break
+      if (index > 0) sse.event('delta', { text: '\n\n' })
+
+      const messages = [
+        ...systemMessages,
+        { role: 'user' as const, content: (prepared[index] as PreparedAnswer).prompt },
+      ]
+
+      for await (const event of streamChatCompletion(
+        config,
+        {
+          ...request,
+          messages,
+          temperature: 0.2,
+          reasoningEffort: undefined,
+        },
+        controller.signal,
+      )) {
+        if (controller.signal.aborted) break
+        if (event.type === 'delta') {
+          sse.event('delta', event)
+        } else if (event.type === 'start' && index === 0) {
+          sse.event('start', event)
+        }
+      }
+    }
+
+    if (!controller.signal.aborted) {
+      sse.event('done', { finishReason: 'stop', usage: null })
+    }
+  } catch (error) {
+    if (controller.signal.aborted) {
+      sse.event('cancelled', { ok: true })
+    } else if (error instanceof ProviderError) {
+      sse.event('error', { code: error.code, message: error.message })
+    } else {
+      sse.event('error', {
+        code: 'unexpected_error',
+        message: 'Something went wrong while generating the response.',
+      })
+    }
+  } finally {
+    res.off('close', abort)
+    sse.close()
+  }
+}
+
+function toRagQuestion(question: DocumentQuestion): RagQuestion {
+  return {
+    question_number: question.question_number,
+    question_text: question.question_text,
+    options: question.options,
+    marks: question.marks,
+    section: question.section,
+    page_number: question.page_number,
   }
 }
 
@@ -156,6 +266,89 @@ export async function handleChat(
     expanded_question: effectiveQuestion !== lastUser.content,
   })
 
+  const supabase = getUserSupabase(config, accessToken)
+  let questionSelection: ReturnType<typeof selectQuestions> = null
+  try {
+    const questions = await loadDocumentQuestions(supabase, documentIds)
+    questionSelection = selectQuestions(
+      questions,
+      lastUser.content,
+      config.ragAnswerAllMaxQuestions,
+    )
+  } catch (error) {
+    ragDebugError('chat.questions_load_failed', error)
+  }
+
+  const answerQuestions = async (
+    questions: DocumentQuestion[],
+  ): Promise<{ prepared: PreparedAnswer[]; mode: ChatMode }> => {
+    const batches = batchQuestions(questions, config.ragQuestionBatchSize)
+    const prepared: PreparedAnswer[] = []
+
+    for (const batch of batches) {
+      const queries = batch.map(questionSearchText)
+      const candidates = await retrieveRelevantChunks(
+        queries.join('\n\n'),
+        user.id,
+        config,
+        {
+          topK: Math.max(config.ragMaxContextChunks, 10),
+          threshold: 0,
+          relativeThreshold: config.ragRelativeThreshold,
+          documentIds,
+          conversationId,
+          queryVariants: queries.slice(0, 3),
+        },
+        accessToken,
+      )
+      const relevant = filterRetrievedChunks(candidates, {
+        documentIds,
+        threshold: config.ragSimilarityThreshold,
+        relativeThreshold: config.ragRelativeThreshold,
+        topK: config.ragMaxContextChunks,
+      })
+      const { prompt, citations } = buildQuestionPaperPrompt(
+        batch.map(toRagQuestion),
+        relevant,
+        'document',
+      )
+      prepared.push({ prompt, citations })
+      ragDebug('chat.question_batch', {
+        questions: batch.map((question) => question.question_number),
+        candidates: candidates.length,
+        relevant: relevant.length,
+        prompt_chars: prompt.length,
+      })
+    }
+
+    return { prepared, mode: 'document' }
+  }
+
+  if (questionSelection) {
+    try {
+      const result = await answerQuestions(questionSelection.questions)
+      ragDebug('chat.answer_questions', {
+        intent: questionSelection.intent,
+        questions: questionSelection.questions.length,
+        batches: result.prepared.length,
+        requested_keys: questionSelection.requestedKeys,
+      })
+      await streamPreparedAnswers(res, config, request, result.prepared)
+      return
+    } catch (error) {
+      ragDebugError('chat.question_answer_failed', error)
+      sendError(
+        res,
+        new HttpError(
+          502,
+          'retrieval_failed',
+          'Question-paper retrieval failed. Check the embeddings configuration and try again.',
+        ),
+      )
+      return
+    }
+  }
+
   let candidates: RetrievedChunk[]
   try {
     candidates = await retrieveRelevantChunks(
@@ -163,8 +356,9 @@ export async function handleChat(
       user.id,
       config,
       {
-        topK: Math.max(config.ragMaxContextChunks, 8),
+        topK: Math.max(config.ragMaxContextChunks, 12),
         threshold: 0,
+        relativeThreshold: config.ragRelativeThreshold,
         documentIds,
         conversationId,
       },
@@ -183,14 +377,18 @@ export async function handleChat(
     return
   }
 
-  const relevant = candidates
-    .filter((chunk) => chunk.similarity >= config.ragSimilarityThreshold)
-    .slice(0, config.ragMaxContextChunks)
+  const relevant = filterRetrievedChunks(candidates, {
+    documentIds,
+    threshold: config.ragSimilarityThreshold,
+    relativeThreshold: config.ragRelativeThreshold,
+    topK: config.ragMaxContextChunks,
+  })
   ragDebug('chat.retrieval', {
     conversation: shortId(conversationId),
     candidates: candidates.length,
     relevant: relevant.length,
     threshold: config.ragSimilarityThreshold,
+    relative_threshold: config.ragRelativeThreshold,
     document_count: documentIds.length,
   })
 
@@ -201,7 +399,7 @@ export async function handleChat(
       question: effectiveQuestion,
       documentNames: conversationDocuments.map((document) => document.filename),
       chunks: candidates.slice(0, 5),
-      signal: AbortSignal.timeout(8_000),
+      signal: AbortSignal.timeout(12_000),
     })
   } catch (error) {
     ragDebugError('chat.classifier_failed', error)
@@ -217,11 +415,11 @@ export async function handleChat(
   ragDebug('chat.mode', { mode, relevant: relevant.length })
 
   if (mode === 'general') {
-    await streamResponse(res, config, request)
+    await streamResponse(res, config, request, { items: [], mode: 'general' })
     return
   }
 
-  const promptChunks = mode === 'document' && relevant.length === 0 ? [] : relevant
+  const promptChunks = relevant
   const { prompt, citations } = buildRagPrompt(effectiveQuestion, promptChunks, mode)
   ragDebug('chat.prompt', {
     mode,

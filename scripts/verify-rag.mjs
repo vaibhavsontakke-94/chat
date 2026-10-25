@@ -171,7 +171,9 @@ try {
   if (!citations?.found) throw new Error('RAG returned no citations')
   if (citations.mode !== 'document') throw new Error(`unexpected mode: ${citations.mode}`)
   if (!done) throw new Error('RAG stream did not complete')
-  if (!/ORBITAL-42/i.test(answer)) throw new Error('Answer did not use the retrieved document content')
+  if (!/ORBITAL[\s\u2010-\u2015-]*42/i.test(answer)) {
+    throw new Error('Answer did not use the retrieved document content')
+  }
   console.log('[ok] RAG retrieval + grounded answer')
 
   const vagueRes = await fetch(`${apiBase}/api/chat`, {

@@ -26,6 +26,7 @@ export interface ChatRequest {
   messages: WireMessage[]
   temperature: number
   maxTokens: number
+  reasoningEffort?: 'low' | 'medium' | 'high'
 }
 
 export interface ValidationError {

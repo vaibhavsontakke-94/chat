@@ -135,6 +135,7 @@ export async function completeChat(
         messages: request.messages,
         temperature: request.temperature,
         max_tokens: request.maxTokens,
+        ...(request.reasoningEffort ? { reasoning_effort: request.reasoningEffort } : {}),
         stream: false,
       }),
       signal,
