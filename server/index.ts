@@ -78,7 +78,7 @@ async function handleRequest(
       }
 
       if (path.startsWith('/api/documents')) {
-        await handleDocuments(req, res, config, path)
+        await handleDocuments(req, res, config, path, searchParams)
         return
       }
 

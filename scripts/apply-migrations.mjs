@@ -40,6 +40,8 @@ const migrations = [
   'migrations/002_rag_pgvector.sql',
   'migrations/003_auth_hardening.sql',
   'migrations/004_history_pagination_and_scoped_rag.sql',
+  'migrations/005_rag_ready_documents.sql',
+  'migrations/006_persistent_document_attachments.sql',
 ]
 
 async function runSql(query, label) {

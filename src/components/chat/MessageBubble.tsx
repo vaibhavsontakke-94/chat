@@ -1,5 +1,5 @@
 import { AlertTriangle, FileText, RotateCcw, Sparkles } from 'lucide-react'
-import type { ChatMessage } from '../../types/chat'
+import type { ChatMessage, Citation } from '../../types/chat'
 import { cn } from '../../lib/cn'
 import { formatTime } from '../../lib/format'
 import { Button } from '../ui/Button'
@@ -8,9 +8,15 @@ export interface MessageBubbleProps {
   message: ChatMessage
   showTimestamp: boolean
   onRetry?: () => void
+  onOpenCitation?: (documentId: string, pageNumber: number | null) => void
 }
 
-export function MessageBubble({ message, showTimestamp, onRetry }: MessageBubbleProps) {
+export function MessageBubble({
+  message,
+  showTimestamp,
+  onRetry,
+  onOpenCitation,
+}: MessageBubbleProps) {
   const isUser = message.role === 'user'
   const isStreaming = message.status === 'streaming'
   const isError = message.status === 'error'
@@ -66,17 +72,35 @@ export function MessageBubble({ message, showTimestamp, onRetry }: MessageBubble
 
         {!isUser && message.citations && message.citations.length > 0 ? (
           <div className="mt-1 flex w-full flex-wrap gap-1.5">
-            {message.citations.map((c: any, idx: number) => (
-              <span
-                key={idx}
-                className="inline-flex items-center gap-1 rounded-lg border border-line bg-surface px-2 py-0.5 text-[10px] text-ink-muted"
-                title={c.content ? c.content.slice(0, 100) : ''}
-              >
-                <FileText className="h-3 w-3" />
-                [{idx + 1}] {c.filename}
-                {c.page_number ? ` · p.${c.page_number}` : ''}
-              </span>
-            ))}
+            {message.citations.map((citation: Citation, idx: number) => {
+              const label = `[${idx + 1}] ${citation.filename}${
+                citation.page_number ? ` · p.${citation.page_number}` : ''
+              }`
+              const canOpen = Boolean(citation.document_id && onOpenCitation)
+              return canOpen ? (
+                <button
+                  type="button"
+                  key={`${citation.chunk_id}-${idx}`}
+                  onClick={() =>
+                    onOpenCitation?.(citation.document_id as string, citation.page_number)
+                  }
+                  className="inline-flex items-center gap-1 rounded-lg border border-line bg-surface px-2 py-0.5 text-[10px] text-ink-muted transition-colors hover:border-line-strong hover:bg-surface-hover hover:text-ink"
+                  title={`Open ${citation.filename}`}
+                >
+                  <FileText className="h-3 w-3" />
+                  {label}
+                </button>
+              ) : (
+                <span
+                  key={`${citation.chunk_id}-${idx}`}
+                  className="inline-flex items-center gap-1 rounded-lg border border-line bg-surface px-2 py-0.5 text-[10px] text-ink-muted"
+                  title={citation.filename}
+                >
+                  <FileText className="h-3 w-3" />
+                  {label}
+                </span>
+              )
+            })}
           </div>
         ) : null}
 

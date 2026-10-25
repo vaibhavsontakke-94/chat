@@ -1,4 +1,4 @@
-import {
+﻿import {
   useEffect,
   useRef,
   useState,
@@ -12,7 +12,9 @@ import {
   Check,
   FileText,
   Plus,
+  RefreshCw,
   Square,
+  Trash2,
   UploadCloud,
   X,
 } from 'lucide-react'
@@ -37,6 +39,9 @@ export interface ChatInputProps {
   onAttachFiles?: (files: File[]) => void
   onAttachExisting?: (id: string) => void
   onRemoveAttached?: (id: string) => void
+  onDeleteServerDocument?: (id: string) => void
+  onReindexDocument?: (id: string) => void
+  reindexingIds?: Record<string, boolean>
   uploadingFiles?: string[]
   uploadError?: string | null
   onDismissUploadError?: () => void
@@ -49,11 +54,13 @@ export interface ChatInputProps {
 const MAX_TEXTAREA_HEIGHT = 220
 
 const STATUS_LABELS: Record<string, string> = {
-  ready: 'Ready',
+  uploading: 'Uploading',
   processing: 'Processing',
+  completed: 'Ready',
   pending: 'Queued',
   queued: 'Queued',
   rejected: 'Rejected',
+  failed: 'Failed',
   error: 'Upload failed',
 }
 
@@ -63,9 +70,10 @@ function statusLabel(status?: string): string {
 }
 
 function StatusDot({ status }: { status?: string }) {
-  const isReady = status === 'ready'
-  const isError = status === 'error' || status === 'rejected'
-  const isProcessing = status === 'processing' || status === 'pending' || status === 'queued'
+  const isReady = status === 'completed'
+  const isError = status === 'failed' || status === 'error' || status === 'rejected'
+  const isProcessing =
+    status === 'uploading' || status === 'processing' || status === 'pending' || status === 'queued'
 
   return (
     <span
@@ -93,6 +101,9 @@ export function ChatInput({
   onAttachFiles,
   onAttachExisting,
   onRemoveAttached,
+  onDeleteServerDocument,
+  onReindexDocument,
+  reindexingIds = {},
   uploadingFiles = [],
   uploadError = null,
   onDismissUploadError,
@@ -106,6 +117,7 @@ export function ChatInput({
   const containerRef = useRef<HTMLDivElement>(null)
   const [showAttach, setShowAttach] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
 
   useEffect(() => {
     const element = textareaRef.current
@@ -118,10 +130,16 @@ export function ChatInput({
     if (!showAttach) return
 
     const handlePointerDown = (event: MouseEvent) => {
-      if (!containerRef.current?.contains(event.target as Node)) setShowAttach(false)
+      if (!containerRef.current?.contains(event.target as Node)) {
+        setShowAttach(false)
+        setConfirmDeleteId(null)
+      }
     }
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') setShowAttach(false)
+      if (event.key === 'Escape') {
+        setShowAttach(false)
+        setConfirmDeleteId(null)
+      }
     }
 
     document.addEventListener('mousedown', handlePointerDown)
@@ -164,14 +182,21 @@ export function ChatInput({
     submitFiles(Array.from(event.dataTransfer.files ?? []))
   }
 
+  const toggleAttach = () => {
+    setConfirmDeleteId(null)
+    setShowAttach((current) => !current)
+  }
+
   const totalAttached = attachedFiles.length
-  const allReady = totalAttached > 0 && attachedFiles.every((file) => file.status === 'ready')
+  const allReady =
+    totalAttached > 0 && attachedFiles.every((file) => file.status === 'completed')
   const hasFailed = attachedFiles.some(
-    (file) => file.status === 'error' || file.status === 'rejected',
+    (file) => file.status === 'failed' || file.status === 'error' || file.status === 'rejected',
   )
   const isUploading = uploadingFiles.length > 0
   const isProcessing = attachedFiles.some(
-    (file) => file.status === 'processing' || file.status === 'pending',
+    (file) =>
+      file.status === 'uploading' || file.status === 'processing' || file.status === 'pending',
   )
   const isQueued = attachedFiles.some((file) => file.status === 'queued')
   const charactersLeft = maxChars - value.length
@@ -225,12 +250,15 @@ export function ChatInput({
                 <div className="min-w-0">
                   <p className="text-sm font-medium text-ink">Documents</p>
                   <p className="mt-0.5 text-[11px] text-ink-subtle">
-                    {totalAttached} attached · PDF up to 25 MB
+                    {totalAttached} attached Â· Documents up to 25 MB
                   </p>
                 </div>
                 <button
                   type="button"
-                  onClick={() => setShowAttach(false)}
+                  onClick={() => {
+                    setShowAttach(false)
+                    setConfirmDeleteId(null)
+                  }}
                   aria-label="Close document panel"
                   className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-ink-subtle transition-colors hover:bg-surface-hover hover:text-ink"
                 >
@@ -254,7 +282,7 @@ export function ChatInput({
                   )}
                 >
                   <UploadCloud className="mx-auto h-5 w-5 text-brand" aria-hidden="true" />
-                  <p className="mt-2 text-xs text-ink-muted">Drop a PDF here, or</p>
+                  <p className="mt-2 text-xs text-ink-muted">Drop documents here, or</p>
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
@@ -267,7 +295,7 @@ export function ChatInput({
                     ref={fileInputRef}
                     type="file"
                     multiple
-                    accept=".pdf,application/pdf"
+                    accept=".pdf,.docx,.txt,.md,.markdown,.csv,.json,.html,.htm,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg"
                     onChange={handleFileChange}
                     className="hidden"
                   />
@@ -330,32 +358,86 @@ export function ChatInput({
                       Your documents
                     </p>
                     <ul className="divide-y divide-line/60 overflow-hidden rounded-xl border border-line/70 bg-surface/30">
-                      {availableFiles.map((file) => (
-                        <li key={file.id} className="flex items-center gap-2.5 px-3 py-2.5">
-                          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-line bg-surface-raised text-ink-muted">
-                            <FileText className="h-4 w-4" aria-hidden="true" />
-                          </span>
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate text-xs text-ink" title={file.name}>
-                              {file.name}
+                      {availableFiles.map((file) => {
+                        const isReindexing = reindexingIds[file.id] === true
+                        return (
+                          <li key={file.id} className="flex items-center gap-2.5 px-3 py-2.5">
+                            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-line bg-surface-raised text-ink-muted">
+                              <FileText className="h-4 w-4" aria-hidden="true" />
                             </span>
-                            <span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-ink-subtle">
-                              <StatusDot status={file.status} />
-                              {statusLabel(file.status)}
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-xs text-ink" title={file.name}>
+                                {file.name}
+                              </span>
+                              <span className="mt-0.5 flex items-center gap-1.5 text-[10px] text-ink-subtle">
+                                <StatusDot status={file.status} />
+                                {isReindexing ? 'Reindexing' : statusLabel(file.status)}
+                              </span>
                             </span>
-                          </span>
-                          {onAttachExisting ? (
-                            <button
-                              type="button"
-                              onClick={() => onAttachExisting(file.id)}
-                              className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-line bg-surface-raised px-2.5 py-1.5 text-[11px] font-medium text-ink transition-colors hover:border-line-strong hover:bg-surface-hover"
-                            >
-                              <Plus className="h-3 w-3" aria-hidden="true" />
-                              Attach
-                            </button>
-                          ) : null}
-                        </li>
-                      ))}
+                            <div className="flex shrink-0 items-center gap-1">
+                              {onReindexDocument ? (
+                                <button
+                                  type="button"
+                                  onClick={() => onReindexDocument(file.id)}
+                                  disabled={isReindexing}
+                                  aria-label={`Reindex ${file.name}`}
+                                  title="Reindex document"
+                                  className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-ink-subtle transition-colors hover:bg-surface-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
+                                >
+                                  <RefreshCw
+                                    className={cn('h-3.5 w-3.5', isReindexing && 'animate-spin')}
+                                    aria-hidden="true"
+                                  />
+                                </button>
+                              ) : null}
+                              {onDeleteServerDocument ? (
+                                confirmDeleteId === file.id ? (
+                                  <span className="flex items-center gap-0.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        onDeleteServerDocument(file.id)
+                                        setConfirmDeleteId(null)
+                                      }}
+                                      className="rounded px-1.5 py-1 text-[10px] font-semibold text-danger hover:bg-danger-soft"
+                                    >
+                                      Delete
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setConfirmDeleteId(null)}
+                                      aria-label="Cancel delete"
+                                      className="inline-flex h-6 w-6 items-center justify-center rounded text-ink-subtle hover:bg-surface-hover hover:text-ink"
+                                    >
+                                      <X className="h-3 w-3" aria-hidden="true" />
+                                    </button>
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => setConfirmDeleteId(file.id)}
+                                    aria-label={`Delete ${file.name}`}
+                                    title="Delete document"
+                                    className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-ink-subtle transition-colors hover:bg-danger-soft hover:text-danger"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                                  </button>
+                                )
+                              ) : null}
+                              {onAttachExisting ? (
+                                <button
+                                  type="button"
+                                  onClick={() => onAttachExisting(file.id)}
+                                  className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-line bg-surface-raised px-2.5 py-1.5 text-[11px] font-medium text-ink transition-colors hover:border-line-strong hover:bg-surface-hover"
+                                >
+                                  <Plus className="h-3 w-3" aria-hidden="true" />
+                                  Attach
+                                </button>
+                              ) : null}
+                            </div>
+                          </li>
+                        )
+                      })}
                     </ul>
                   </div>
                 ) : null}
@@ -371,7 +453,8 @@ export function ChatInput({
                   ) : (
                     <ul className="divide-y divide-line/60 overflow-hidden rounded-xl border border-line/70 bg-surface/30">
                       {attachedFiles.map((file) => {
-                        const isError = file.status === 'error' || file.status === 'rejected'
+                        const isError =
+  file.status === 'failed' || file.status === 'error' || file.status === 'rejected'
                         return (
                           <li
                             key={file.id}
@@ -429,7 +512,7 @@ export function ChatInput({
             <div className="flex items-center justify-between gap-2">
               <button
                 type="button"
-                onClick={() => setShowAttach((current) => !current)}
+                onClick={toggleAttach}
                 aria-expanded={showAttach}
                 aria-controls="document-panel"
                 className="inline-flex min-w-0 items-center gap-1.5 rounded-lg text-xs font-medium text-ink-muted transition-colors hover:text-ink"
@@ -471,7 +554,8 @@ export function ChatInput({
             {totalAttached > 0 ? (
               <div className="mt-3 flex max-w-full flex-wrap gap-2">
                 {attachedFiles.map((file) => {
-                  const isError = file.status === 'error' || file.status === 'rejected'
+                  const isError =
+  file.status === 'failed' || file.status === 'error' || file.status === 'rejected'
                   return (
                     <span
                       key={file.id}
@@ -479,7 +563,7 @@ export function ChatInput({
                         'inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-[11px] text-ink',
                         isError ? 'border-danger/35 bg-danger-soft' : 'border-line bg-surface-raised/70',
                       )}
-                      title={`${file.name} · ${statusLabel(file.status)}`}
+                      title={`${file.name} Â· ${statusLabel(file.status)}`}
                     >
                       <FileText className="h-3.5 w-3.5 shrink-0 text-ink-muted" aria-hidden="true" />
                       <span className="min-w-0 max-w-[13rem] truncate sm:max-w-[18rem]">
@@ -520,7 +604,7 @@ export function ChatInput({
             <div className="mt-2 flex items-center justify-between gap-2">
               <button
                 type="button"
-                onClick={() => setShowAttach((current) => !current)}
+                onClick={toggleAttach}
                 aria-label="Add documents"
                 aria-expanded={showAttach}
                 aria-controls="document-panel"
@@ -564,3 +648,4 @@ export function ChatInput({
     </div>
   )
 }
+

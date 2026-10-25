@@ -9,6 +9,9 @@ export interface AppConfig {
   supabaseAnonKey: string | null
   supabaseServiceRoleKey: string | null
   supabaseJwtSecret: string | null
+  cronSecret: string | null
+  ragSimilarityThreshold: number
+  ragMaxContextChunks: number
 }
 
 function readEnv(name: string): string | undefined {
@@ -22,6 +25,12 @@ function toNumber(value: string | undefined, fallback: number): number {
   if (value === undefined) return fallback
   const parsed = Number.parseInt(value, 10)
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
+function toFloat(value: string | undefined, fallback: number): number {
+  if (value === undefined) return fallback
+  const parsed = Number.parseFloat(value)
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback
 }
 
 function readAllowedOrigins(): string[] {
@@ -48,6 +57,9 @@ export function loadConfig(): AppConfig {
     supabaseAnonKey: readEnv('VITE_SUPABASE_ANON_KEY') ?? readEnv('SUPABASE_ANON_KEY') ?? null,
     supabaseServiceRoleKey: readEnv('SUPABASE_SERVICE_ROLE_KEY') ?? null,
     supabaseJwtSecret: readEnv('SUPABASE_JWT_SECRET') ?? null,
+    cronSecret: readEnv('CRON_SECRET') ?? null,
+    ragSimilarityThreshold: toFloat(readEnv('RAG_SIMILARITY_THRESHOLD'), 0.2),
+    ragMaxContextChunks: toNumber(readEnv('RAG_MAX_CONTEXT_CHUNKS'), 6),
   }
 }
 

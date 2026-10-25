@@ -9,11 +9,23 @@ export interface MessageListProps {
   messages: ChatMessage[]
   showTimestamps: boolean
   onRetry: () => void
+  hasMoreMessages?: boolean
+  loadingOlder?: boolean
+  onLoadMore?: () => void
+  onOpenCitation?: (documentId: string, pageNumber: number | null) => void
 }
 
 const BOTTOM_THRESHOLD = 120
 
-export function MessageList({ messages, showTimestamps, onRetry }: MessageListProps) {
+export function MessageList({
+  messages,
+  showTimestamps,
+  onRetry,
+  hasMoreMessages = false,
+  loadingOlder = false,
+  onLoadMore,
+  onOpenCitation,
+}: MessageListProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [pinnedToBottom, setPinnedToBottom] = useState(true)
 
@@ -57,12 +69,25 @@ export function MessageList({ messages, showTimestamps, onRetry }: MessageListPr
         className="h-full overflow-y-auto overscroll-contain px-4 py-6 sm:px-6"
       >
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-6">
+          {hasMoreMessages && onLoadMore ? (
+            <div className="flex justify-center">
+              <button
+                type="button"
+                onClick={onLoadMore}
+                disabled={loadingOlder}
+                className="rounded-full border border-line bg-surface-raised px-3.5 py-1.5 text-[11px] font-medium text-ink-muted transition-colors hover:border-line-strong hover:bg-surface-hover hover:text-ink disabled:cursor-wait disabled:opacity-60"
+              >
+                {loadingOlder ? 'Loading older messages...' : 'Load older messages'}
+              </button>
+            </div>
+          ) : null}
           {messages.map((message) => (
             <MessageBubble
               key={message.id}
               message={message}
               showTimestamp={showTimestamps}
               onRetry={onRetry}
+              onOpenCitation={onOpenCitation}
             />
           ))}
         </div>

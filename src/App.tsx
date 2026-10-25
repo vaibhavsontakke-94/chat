@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertCircle, X } from 'lucide-react'
 import { AuthSplash } from './components/auth/AuthSplash'
 import { usePathname } from './lib/router'
@@ -12,11 +12,7 @@ import { SettingsView } from './components/views/SettingsView'
 import { Button } from './components/ui/Button'
 import { IconButton } from './components/ui/IconButton'
 import { useChat } from './hooks/useChat'
-import {
-  MAX_FILE_SIZE_BYTES,
-  formatFileSize,
-  useDocuments,
-} from './hooks/useDocuments'
+import { MAX_FILE_SIZE_BYTES, formatFileSize, isAcceptedFile } from './hooks/useDocuments'
 import { useMediaQuery, MOBILE_QUERY } from './hooks/useMediaQuery'
 import { usePreferences } from './hooks/usePreferences'
 import { fetchModels, fetchProviderStatus } from './lib/api/chatClient'
@@ -40,14 +36,35 @@ function toChatMessage(message: PersistedMessage): ChatMessage | null {
   }
 }
 
-type AttachmentSource = 'server' | 'local'
-
 interface AttachmentRef {
   id: string
-  source: AttachmentSource
 }
 
 const EMPTY_ATTACHMENT_REFS: AttachmentRef[] = []
+
+function buildAttachmentsBySession(
+  documents: ServerDocument[],
+  sessions: ChatSession[],
+): Record<string, AttachmentRef[]> {
+  const byConversation = new Map<string, string[]>()
+  for (const document of documents) {
+    const conversationIds =
+      document.conversation_ids ??
+      (document.conversation_id ? [document.conversation_id] : [])
+    for (const conversationId of conversationIds) {
+      const ids = byConversation.get(conversationId) ?? []
+      if (!ids.includes(document.id)) ids.push(document.id)
+      byConversation.set(conversationId, ids)
+    }
+  }
+
+  const map: Record<string, AttachmentRef[]> = {}
+  for (const session of sessions) {
+    const conversationId = session.remoteId ?? session.id
+    map[session.id] = (byConversation.get(conversationId) ?? []).map((id) => ({ id }))
+  }
+  return map
+}
 
 function ChatApp({ initialView = 'chat' }: { initialView?: AppView }) {
   const { sendOnEnter, showTimestamps } = usePreferences()
@@ -67,18 +84,17 @@ function ChatApp({ initialView = 'chat' }: { initialView?: AppView }) {
   const [models, setModels] = useState<ModelOption[]>([])
   const [activeModel, setActiveModel] = useState<string | null>(null)
 
-  const documents = useDocuments()
   const serverDocs = useServerDocuments()
   const [serverDocList, setServerDocList] = useState<ServerDocument[]>([])
   const [uploadingFiles, setUploadingFiles] = useState<string[]>([])
-  const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({})
+  const [reindexingIds, setReindexingIds] = useState<Record<string, boolean>>({})
   const [loadingOlder, setLoadingOlder] = useState<Record<string, boolean>>({})
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [canRetryUpload, setCanRetryUpload] = useState(false)
   const [attachmentsBySession, setAttachmentsBySession] = useState<
     Record<string, AttachmentRef[]>
   >({})
-  const seededUserRef = useRef<string | null>(null)
+  const sessionsRef = useRef<ChatSession[]>([])
   const uploadingNamesRef = useRef<Set<string>>(new Set())
   const lastFailedUploadRef = useRef<{ file: File; sessionId: string } | null>(null)
 
@@ -86,17 +102,17 @@ function ChatApp({ initialView = 'chat' }: { initialView?: AppView }) {
     () => (auth.user ? serverDocList : []),
     [auth.user, serverDocList],
   )
-  const readyDocumentIdsBySession = useMemo(() => {
-    const readyIds = new Set(
+  const documentIdsBySession = useMemo(() => {
+    const completedIds = new Set(
       visibleServerDocs
-        .filter((document) => document.status === 'ready')
+        .filter((document) => document.status === 'completed')
         .map((document) => document.id),
     )
     const map: Record<string, string[]> = {}
 
     for (const [sessionId, refs] of Object.entries(attachmentsBySession)) {
       map[sessionId] = refs
-        .filter((ref) => ref.source === 'server' && readyIds.has(ref.id))
+        .filter((ref) => completedIds.has(ref.id))
         .map((ref) => ref.id)
     }
 
@@ -104,12 +120,13 @@ function ChatApp({ initialView = 'chat' }: { initialView?: AppView }) {
   }, [attachmentsBySession, visibleServerDocs])
   const chat = useChat({
     model: activeModel,
-    documentIdsBySession: readyDocumentIdsBySession,
+    documentIdsBySession,
     accessToken: auth.getAccessToken(),
     persistence: auth.user
       ? {
           createConversation: conversations.create,
           addMessage: conversations.addMessage,
+          renameConversation: conversations.rename,
           removeConversation: conversations.remove,
         }
       : null,
@@ -118,6 +135,7 @@ function ChatApp({ initialView = 'chat' }: { initialView?: AppView }) {
     },
   })
   const activeSessionIdRef = useRef(chat.activeSessionId)
+  const ensureConversation = chat.ensureConversation
   const currentAttachments = auth.user
     ? (attachmentsBySession[chat.activeSessionId] ?? EMPTY_ATTACHMENT_REFS)
     : EMPTY_ATTACHMENT_REFS
@@ -126,12 +144,17 @@ function ChatApp({ initialView = 'chat' }: { initialView?: AppView }) {
     activeSessionIdRef.current = chat.activeSessionId
   }, [chat.activeSessionId])
 
+  useEffect(() => {
+    sessionsRef.current = chat.sessions
+  }, [chat.sessions])
+
   const syncedUserRef = useRef<string | null>(null)
   const syncInFlightRef = useRef<string | null>(null)
   const hydrateSessions = chat.hydrate
   const resetSessions = chat.reset
   const listConversations = conversations.list
   const loadConversationMessages = conversations.loadMessages
+  const listDocuments = serverDocs.list
 
   useEffect(() => {
     if (auth.loading) return
@@ -141,6 +164,8 @@ function ChatApp({ initialView = 'chat' }: { initialView?: AppView }) {
       if (syncedUserRef.current !== null) {
         syncedUserRef.current = null
         resetSessions()
+        setServerDocList([])
+        setAttachmentsBySession({})
       }
       return
     }
@@ -151,8 +176,8 @@ function ChatApp({ initialView = 'chat' }: { initialView?: AppView }) {
 
     let cancelled = false
     void (async () => {
-      const list = await listConversations()
-        const sessions = await Promise.all(
+      const [list, documents] = await Promise.all([listConversations(), listDocuments()])
+      const sessions = await Promise.all(
         list.map(async (conversation): Promise<ChatSession> => {
           const page = await loadConversationMessages(conversation.id)
           const messages = page.messages
@@ -173,6 +198,8 @@ function ChatApp({ initialView = 'chat' }: { initialView?: AppView }) {
       if (syncInFlightRef.current === userId) syncInFlightRef.current = null
       if (!cancelled) {
         syncedUserRef.current = userId
+        setServerDocList(documents)
+        setAttachmentsBySession(buildAttachmentsBySession(documents, sessions))
         hydrateSessions(sessions)
       }
     })()
@@ -187,6 +214,7 @@ function ChatApp({ initialView = 'chat' }: { initialView?: AppView }) {
     hydrateSessions,
     listConversations,
     loadConversationMessages,
+    listDocuments,
     resetSessions,
   ])
 
@@ -239,37 +267,6 @@ function ChatApp({ initialView = 'chat' }: { initialView?: AppView }) {
     return () => controller.abort()
   }, [])
 
-  useEffect(() => {
-    if (!auth.user) return
-
-    const userId = auth.user.id
-    let cancelled = false
-    serverDocs
-      .list()
-      .then((next) => {
-        if (cancelled) return
-        setServerDocList(next)
-
-        if (seededUserRef.current === userId) return
-        seededUserRef.current = userId
-        const sessionId = activeSessionIdRef.current
-        setAttachmentsBySession((current) => ({
-          ...current,
-          [sessionId]: next.map((document) => ({
-            id: document.id,
-            source: 'server' as const,
-          })),
-        }))
-      })
-      .catch(() => {
-        if (!cancelled) setServerDocList([])
-      })
-
-    return () => {
-      cancelled = true
-    }
-  }, [auth.user, serverDocs])
-
   const handleSend = useCallback(() => {
     const content = composer.trim()
     if (content.length === 0) return
@@ -280,8 +277,22 @@ function ChatApp({ initialView = 'chat' }: { initialView?: AppView }) {
   const refreshServerDocs = useCallback(async () => {
     const next = await serverDocs.list().catch(() => [] as ServerDocument[])
     setServerDocList(next)
+    setAttachmentsBySession(buildAttachmentsBySession(next, sessionsRef.current))
     return next
   }, [serverDocs])
+
+  useEffect(() => {
+    if (!auth.user) return
+    const hasActiveDocuments = serverDocList.some(
+      (document) => document.status === 'uploading' || document.status === 'processing',
+    )
+    if (!hasActiveDocuments) return
+
+    const timer = window.setInterval(() => {
+      void refreshServerDocs()
+    }, 2500)
+    return () => window.clearInterval(timer)
+  }, [auth.user, refreshServerDocs, serverDocList])
 
   const handleServerFiles = useCallback(
     async (files: File[], sessionId: string) => {
@@ -300,18 +311,29 @@ function ChatApp({ initialView = 'chat' }: { initialView?: AppView }) {
       }
       if (files.length === 0) return
 
-      const pdfFiles = files.filter((file) => file.name.toLowerCase().endsWith('.pdf'))
-      if (pdfFiles.length === 0) {
-        setUploadError('Only PDF documents are supported.')
+      const supportedFiles = files.filter(isAcceptedFile)
+      if (supportedFiles.length === 0) {
+        setUploadError(
+          'Unsupported file type. Use PDF, DOCX, TXT, MD, CSV, JSON, HTML, PNG, or JPG.',
+        )
         return
       }
 
       const messages: string[] = []
-      if (pdfFiles.length !== files.length) {
-        messages.push('Only PDF documents are supported. Other files were skipped.')
+      if (supportedFiles.length !== files.length) {
+        messages.push(
+          'Unsupported files were skipped. Use PDF, DOCX, TXT, MD, CSV, JSON, HTML, PNG, or JPG.',
+        )
       }
 
-      for (const file of pdfFiles) {
+      const session = sessionsRef.current.find((item) => item.id === sessionId)
+      const conversationId = await ensureConversation(sessionId, session?.title)
+      if (!conversationId) {
+        setUploadError('Could not prepare this conversation for document upload. Try again.')
+        return
+      }
+
+      for (const file of supportedFiles) {
         if (file.size > MAX_FILE_SIZE_BYTES) {
           messages.push(`${file.name} is larger than ${formatFileSize(MAX_FILE_SIZE_BYTES)}.`)
           continue
@@ -323,16 +345,9 @@ function ChatApp({ initialView = 'chat' }: { initialView?: AppView }) {
 
         uploadingNamesRef.current.add(file.name)
         setUploadingFiles(Array.from(uploadingNamesRef.current))
-        setUploadProgress((current) => ({ ...current, [file.name]: 0 }))
 
         try {
-          const conversationId =
-            chat.sessions.find((session) => session.id === sessionId)?.remoteId ?? null
-          const result = await serverDocs.upload(file, {
-            conversationId,
-            onProgress: (percent) =>
-              setUploadProgress((current) => ({ ...current, [file.name]: percent })),
-          })
+          const result = await serverDocs.upload(file, { conversationId })
           if (!result.ok) {
             messages.push(result.message || `Could not upload ${file.name}.`)
             lastFailedUploadRef.current = { file, sessionId }
@@ -348,10 +363,7 @@ function ChatApp({ initialView = 'chat' }: { initialView?: AppView }) {
               if (refs.some((ref) => ref.id === result.documentId)) return current
               return {
                 ...current,
-                [sessionId]: [
-                  ...refs,
-                  { id: result.documentId as string, source: 'server' },
-                ],
+                [sessionId]: [...refs, { id: result.documentId as string }],
               }
             })
           }
@@ -362,19 +374,13 @@ function ChatApp({ initialView = 'chat' }: { initialView?: AppView }) {
         } finally {
           uploadingNamesRef.current.delete(file.name)
           setUploadingFiles(Array.from(uploadingNamesRef.current))
-          setUploadProgress((current) => {
-            if (!(file.name in current)) return current
-            const next = { ...current }
-            delete next[file.name]
-            return next
-          })
         }
       }
 
       await refreshServerDocs()
       if (messages.length > 0) setUploadError(messages.join(' '))
     },
-    [auth.enabled, auth.error, auth.user, chat.sessions, refreshServerDocs, serverDocs],
+    [auth.enabled, auth.error, auth.user, ensureConversation, refreshServerDocs, serverDocs],
   )
 
   const handleAttachFiles = useCallback(
@@ -432,28 +438,107 @@ function ChatApp({ initialView = 'chat' }: { initialView?: AppView }) {
     lastFailedUploadRef.current = null
   }, [])
 
-  const handleAttachExisting = useCallback((id: string) => {
-    const sessionId = activeSessionIdRef.current
-    setAttachmentsBySession((current) => {
-      const refs = current[sessionId] ?? []
-      if (refs.some((ref) => ref.id === id && ref.source === 'server')) return current
-      return {
-        ...current,
-        [sessionId]: [...refs, { id, source: 'server' }],
+  const handleAttachExisting = useCallback(
+    async (id: string) => {
+      const sessionId = activeSessionIdRef.current
+      const session = sessionsRef.current.find((item) => item.id === sessionId)
+      const conversationId = await ensureConversation(sessionId, session?.title)
+      if (!conversationId) {
+        setUploadError('Could not prepare this conversation for document upload. Try again.')
+        return
       }
-    })
-  }, [])
+
+      const ok = await serverDocs.attach(id, conversationId)
+      if (!ok) {
+        setUploadError('Could not attach that document. Please try again.')
+        return
+      }
+
+      setAttachmentsBySession((current) => {
+        const refs = current[sessionId] ?? []
+        if (refs.some((ref) => ref.id === id)) return current
+        return { ...current, [sessionId]: [...refs, { id }] }
+      })
+      await refreshServerDocs()
+    },
+    [ensureConversation, refreshServerDocs, serverDocs],
+  )
 
   const handleRemoveAttached = useCallback(
-    (id: string) => {
+    async (id: string) => {
       const sessionId = activeSessionIdRef.current
+      const session = sessionsRef.current.find((item) => item.id === sessionId)
+      const conversationId = session?.remoteId ?? null
+
+      if (conversationId) {
+        const ok = await serverDocs.detach(id, conversationId)
+        if (!ok) {
+          setUploadError('Could not detach that document. Please try again.')
+          return
+        }
+      }
+
       setAttachmentsBySession((current) => ({
         ...current,
         [sessionId]: (current[sessionId] ?? []).filter((ref) => ref.id !== id),
       }))
-      documents.remove(id)
+      await refreshServerDocs()
     },
-    [documents],
+    [refreshServerDocs, serverDocs],
+  )
+
+  const handleDeleteServerDocument = useCallback(
+    async (id: string) => {
+      setUploadError(null)
+      setCanRetryUpload(false)
+      lastFailedUploadRef.current = null
+
+      const ok = await serverDocs.remove(id)
+      if (!ok) {
+        setUploadError('Could not delete the document. Please try again.')
+        return
+      }
+
+      setServerDocList((current) => current.filter((document) => document.id !== id))
+      setAttachmentsBySession((current) => {
+        let changed = false
+        const next = { ...current }
+        for (const [sessionId, refs] of Object.entries(current)) {
+          const filtered = refs.filter((ref) => ref.id !== id)
+          if (filtered.length !== refs.length) {
+            next[sessionId] = filtered
+            changed = true
+          }
+        }
+        return changed ? next : current
+      })
+      await refreshServerDocs()
+    },
+    [refreshServerDocs, serverDocs],
+  )
+
+  const handleReindexDocument = useCallback(
+    async (id: string) => {
+      setUploadError(null)
+      setCanRetryUpload(false)
+      lastFailedUploadRef.current = null
+      setReindexingIds((current) => ({ ...current, [id]: true }))
+      try {
+        const result = await serverDocs.reindex(id)
+        await refreshServerDocs()
+        if (!result.ok) {
+          setUploadError(result.message || 'Could not reindex the document.')
+        }
+      } finally {
+        setReindexingIds((current) => {
+          if (!(id in current)) return current
+          const next = { ...current }
+          delete next[id]
+          return next
+        })
+      }
+    },
+    [refreshServerDocs, serverDocs],
   )
 
   const handleDeleteSession = useCallback(
@@ -492,28 +577,32 @@ function ChatApp({ initialView = 'chat' }: { initialView?: AppView }) {
     [isMobile],
   )
 
+  const handleOpenCitation = useCallback(
+    async (documentId: string, pageNumber: number | null) => {
+      const result = await serverDocs.link(documentId)
+      if (!result.ok || !result.url) {
+        setUploadError(result.message || 'Could not open the cited document.')
+        return
+      }
+      const url = pageNumber ? `${result.url}#page=${pageNumber}` : result.url
+      window.open(url, '_blank', 'noopener,noreferrer')
+    },
+    [serverDocs],
+  )
+
   const attachedFiles = useMemo(
     () =>
       currentAttachments.flatMap((ref): AttachedFile[] => {
-        if (ref.source === 'server') {
-          const document = visibleServerDocs.find((item) => item.id === ref.id)
-          return document
-            ? [{ id: document.id, name: document.filename, status: document.status }]
-            : []
-        }
-
-        const document = documents.documents.find((item) => item.id === ref.id)
-        return document ? [{ id: document.id, name: document.name, status: document.status }] : []
+        const document = visibleServerDocs.find((item) => item.id === ref.id)
+        return document
+          ? [{ id: document.id, name: document.filename, status: document.status }]
+          : []
       }),
-    [currentAttachments, visibleServerDocs, documents.documents],
+    [currentAttachments, visibleServerDocs],
   )
 
   const availableFiles = useMemo(() => {
-    const attachedIds = new Set(
-      currentAttachments
-        .filter((ref) => ref.source === 'server')
-        .map((ref) => ref.id),
-    )
+    const attachedIds = new Set(currentAttachments.map((ref) => ref.id))
     return visibleServerDocs
       .filter((document) => !attachedIds.has(document.id))
       .map((document) => ({
@@ -599,6 +688,10 @@ function ChatApp({ initialView = 'chat' }: { initialView?: AppView }) {
               messages={chat.activeSession.messages}
               showTimestamps={showTimestamps}
               onRetry={chat.retry}
+              hasMoreMessages={chat.activeSession.hasMoreMessages === true}
+              loadingOlder={loadingOlder[chat.activeSession.id] === true}
+              onLoadMore={handleLoadMoreMessages}
+              onOpenCitation={handleOpenCitation}
             />
           )}
 
@@ -637,6 +730,9 @@ function ChatApp({ initialView = 'chat' }: { initialView?: AppView }) {
             onAttachFiles={handleAttachFiles}
             onAttachExisting={handleAttachExisting}
             onRemoveAttached={handleRemoveAttached}
+            onDeleteServerDocument={handleDeleteServerDocument}
+            onReindexDocument={handleReindexDocument}
+            reindexingIds={reindexingIds}
             uploadingFiles={uploadingFiles}
             uploadError={uploadError}
             onDismissUploadError={dismissUploadError}

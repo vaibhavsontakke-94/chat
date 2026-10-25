@@ -13,22 +13,26 @@
     "test": "node --test \"server/tests/**/*.test.ts\"",
     "typecheck": "tsc -b --pretty",
     "verify:supabase": "node --env-file-if-exists=.env scripts/verify-supabase.mjs",
+    "verify:rag": "node --env-file-if-exists=.env scripts/verify-rag.mjs",
+    "verify:ocr": "node scripts/verify-ocr.mjs",
     "e2e:auth": "node --env-file-if-exists=.env scripts/e2e-auth.mjs",
     "migrate:supabase": "node --env-file-if-exists=.env scripts/apply-migrations.mjs"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^1.0.13",
     "@supabase/supabase-js": "^2.118.0",
     "@tailwindcss/vite": "^4.3.3",
     "firebase": "^13.1.0",
     "firebase-admin": "^14.5.0",
     "jsonwebtoken": "^9.0.3",
     "lucide-react": "^1.61.0",
+    "mammoth": "^1.13.0",
     "multer": "^2.5.0",
-    "pdf-parse": "^2.4.5",
-    "pdfjs-dist": "^6.4.299",
+    "pdfjs-dist": "6.4.299",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "tailwindcss": "^4.3.3"
+    "tailwindcss": "^4.3.3",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "@types/jsonwebtoken": "^9.0.10",

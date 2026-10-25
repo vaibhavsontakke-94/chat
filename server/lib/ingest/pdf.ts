@@ -1,25 +1,4 @@
-import { createRequire } from 'node:module'
-const require = createRequire(import.meta.url)
-
-interface PdfTextPage {
-  num: number
-  text: string
-}
-
-interface PdfTextResult {
-  text: string
-  pages: PdfTextPage[]
-  total: number
-}
-
-interface PdfParser {
-  getText(params?: { pageJoiner?: string }): Promise<PdfTextResult>
-  destroy(): Promise<void>
-}
-
-const { PDFParse } = require('pdf-parse') as {
-  PDFParse: new (options: { data: Buffer | Uint8Array }) => PdfParser
-}
+import { loadPdf } from './pdfjs.ts'
 
 export interface PdfPage {
   pageNumber: number
@@ -34,23 +13,31 @@ export interface PdfExtractResult {
 }
 
 export async function extractPdf(buffer: Buffer): Promise<PdfExtractResult> {
-  // pdf-parse v2 exports a PDFParse class; v1 exported a callable function.
-  const parser = new PDFParse({ data: buffer })
+  const { loadingTask, pdf } = await loadPdf(buffer)
   try {
-    const data = await parser.getText({ pageJoiner: '' })
-    const text = typeof data.text === 'string' ? data.text : ''
-    const numpages = typeof data.total === 'number' ? data.total : 0
-    const pages: PdfPage[] = Array.isArray(data.pages)
-      ? data.pages
-          .filter((page) => page && typeof page.text === 'string')
-          .map((page) => ({ pageNumber: page.num, text: page.text }))
-      : []
-    if (pages.length === 0 && text.trim().length > 0) {
-      // Fallback for versions that only return concatenated text.
-      pages.push({ pageNumber: 1, text })
+    const pages: PdfPage[] = []
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber++) {
+      const page = await pdf.getPage(pageNumber)
+      try {
+        const content = await page.getTextContent()
+        const text = content.items
+          .map((item: { str?: string }) => (typeof item.str === 'string' ? item.str : ''))
+          .join(' ')
+          .replace(/[ \t]+/g, ' ')
+          .replace(/ *\n */g, '\n')
+          .trim()
+        pages.push({ pageNumber, text })
+      } finally {
+        page.cleanup()
+      }
     }
-    return { text, pages, numpages }
+
+    const text = pages
+      .map((page) => page.text)
+      .filter(Boolean)
+      .join('\n\n')
+    return { text, pages, numpages: pdf.numPages }
   } finally {
-    await parser.destroy().catch(() => undefined)
+    await loadingTask.destroy()
   }
 }

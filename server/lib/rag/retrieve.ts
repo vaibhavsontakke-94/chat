@@ -1,6 +1,7 @@
 import type { AppConfig } from '../../config.ts'
 import { embedText } from '../ingest/embeddings.ts'
 import { getUserSupabase } from '../supabase/user.ts'
+import { ragDebug, ragDebugError, shortId } from './debug.ts'
 
 export interface RetrievedChunk {
   chunk_id: string
@@ -51,6 +52,20 @@ function isMissingFunction(error: { code?: string; message?: string } | null): b
   return /could not find the function|schema cache/i.test(error.message ?? '')
 }
 
+export function filterRetrievedChunks(
+  chunks: RetrievedChunk[],
+  opts: { documentIds?: string[]; threshold?: number; topK?: number } = {},
+): RetrievedChunk[] {
+  const documentIds = opts.documentIds ?? []
+  const threshold = opts.threshold ?? 0.2
+  const topK = opts.topK ?? 5
+  const scoped =
+    documentIds.length > 0
+      ? chunks.filter((chunk) => documentIds.includes(chunk.document_id))
+      : chunks
+  return scoped.filter((chunk) => chunk.similarity >= threshold).slice(0, topK)
+}
+
 export async function retrieveRelevantChunks(
   query: string,
   _userId: string,
@@ -64,8 +79,19 @@ export async function retrieveRelevantChunks(
   const hasDocumentScope =
     documentIds.length > 0 || (opts.documentId != null && opts.documentId !== '')
 
+  ragDebug('retrieval.start', {
+    query_length: query.length,
+    top_k: topK,
+    threshold,
+    document_count: documentIds.length + (opts.documentId ? 1 : 0),
+    conversation: shortId(opts.conversationId),
+  })
+
   // Embed the question with the same provider used during ingestion.
-  const [queryEmbedding] = await embedText([query], config)
+  const [queryEmbedding] = await embedText([query], config, { taskType: 'query' })
+  ragDebug('retrieval.query_embedding', {
+    dimensions: queryEmbedding?.length ?? 0,
+  })
 
   // The user-scoped client lets the security-definer RPC derive the owner from
   // auth.uid(), so a caller can never retrieve another user's chunks.
@@ -85,23 +111,34 @@ export async function retrieveRelevantChunks(
   if (isMissingFunction(error)) {
     // Deployment may not have migration 004 yet. Stay functional with the
     // original function, which is still owner-scoped, then filter in-process.
+    ragDebug('retrieval.fallback_rpc', { reason: 'scoped_function_missing' })
     const fallback = await supabase.rpc('match_document_chunks', {
       query_embedding: queryEmbedding,
       match_count: matchCount,
       filter_document_id: opts.documentId ?? null,
     } as never)
-    if (fallback.error) throw fallback.error
+    if (fallback.error) {
+      ragDebugError('retrieval.fallback_failed', fallback.error)
+      throw fallback.error
+    }
     chunks = mapChunks(fallback.data)
   } else {
-    if (error) throw error
+    if (error) {
+      ragDebugError('retrieval.rpc_failed', error)
+      throw error
+    }
     chunks = mapChunks(data)
   }
 
-  const scoped =
-    documentIds.length > 0
-      ? chunks.filter((chunk) => documentIds.includes(chunk.document_id))
-      : chunks
+  const relevant = filterRetrievedChunks(chunks, { documentIds, threshold, topK })
+  ragDebug('retrieval.results', {
+    candidates: chunks.length,
+    relevant: relevant.length,
+    top_chunks: relevant.slice(0, 8).map(
+      (chunk) =>
+        `${chunk.chunk_id.slice(0, 8)}:p${chunk.page_number ?? '-'}:${chunk.similarity.toFixed(3)}`,
+    ),
+  })
 
-  // Filter by threshold and take topK.
-  return scoped.filter((chunk) => chunk.similarity >= threshold).slice(0, topK)
+  return relevant
 }

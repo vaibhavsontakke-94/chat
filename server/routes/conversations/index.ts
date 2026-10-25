@@ -6,12 +6,17 @@ import { HttpError } from '../../lib/errors.ts'
 import { sendError, sendJson, readJsonBody } from '../../lib/http.ts'
 import { MAX_BODY_BYTES } from '../../constants.ts'
 import { parseListParams, parseMessagePageParams } from '../../lib/pagination.ts'
+import {
+  documentObjectPath,
+  removeDocumentObject,
+} from '../../lib/storage/documents.ts'
 
 const MAX_TITLE_LENGTH = 200
 const MAX_CLIENT_ID_LENGTH = 200
 const MAX_CITATIONS = 20
 
 interface StoredCitation {
+  document_id: string | null
   filename: string
   page_number: number | null
   chunk_id: string
@@ -53,6 +58,7 @@ function parseCitations(value: unknown): StoredCitation[] {
     const record = entry as Record<string, unknown>
     if (typeof record.filename !== 'string' || typeof record.chunk_id !== 'string') continue
     citations.push({
+      document_id: typeof record.document_id === 'string' ? record.document_id.slice(0, 100) : null,
       filename: record.filename.slice(0, 300),
       page_number:
         typeof record.page_number === 'number' && Number.isFinite(record.page_number)
@@ -71,6 +77,62 @@ function parseCitations(value: unknown): StoredCitation[] {
 
 function messageMetadata(citations: StoredCitation[]): Record<string, unknown> {
   return citations.length > 0 ? { citations } : {}
+}
+
+async function cleanupConversationDocuments(
+  supabase: ReturnType<typeof getUserSupabase>,
+  config: AppConfig,
+  userId: string,
+  conversationId: string,
+): Promise<void> {
+  const { data: attachments } = await supabase
+    .from('document_attachments')
+    .select('document_id')
+    .eq('conversation_id', conversationId)
+    .eq('user_id', userId)
+  const { data: legacyDocuments } = await supabase
+    .from('documents')
+    .select('id')
+    .eq('conversation_id', conversationId)
+    .eq('user_id', userId)
+
+  const candidateIds = new Set<string>()
+  for (const row of (attachments ?? []) as Array<{ document_id: string }>) {
+    candidateIds.add(row.document_id)
+  }
+  for (const row of (legacyDocuments ?? []) as Array<{ id: string }>) {
+    candidateIds.add(row.id)
+  }
+  if (candidateIds.size === 0) return
+
+  const ids = [...candidateIds]
+  const { data: docs } = await supabase
+    .from('documents')
+    .select('id,filename')
+    .in('id', ids)
+    .eq('user_id', userId)
+
+  for (const doc of (docs ?? []) as Array<{ id: string; filename: string }>) {
+    const { count } = await supabase
+      .from('document_attachments')
+      .select('document_id', { count: 'exact', head: true })
+      .eq('document_id', doc.id)
+      .eq('user_id', userId)
+      .neq('conversation_id', conversationId)
+    if ((count ?? 0) > 0) continue
+
+    const { error } = await supabase
+      .from('documents')
+      .delete()
+      .eq('id', doc.id)
+      .eq('user_id', userId)
+    if (error) continue
+    await removeDocumentObject(
+      config,
+      supabase,
+      documentObjectPath(userId, doc.id, doc.filename),
+    )
+  }
 }
 
 export async function handleConversations(
@@ -307,6 +369,7 @@ export async function handleConversations(
     }
     // DELETE
     if (req.method === 'DELETE') {
+      await cleanupConversationDocuments(supabase, config, userId, id)
       const { error } = await supabase.from('conversations').delete().eq('id', id).eq('user_id', userId)
       if (error) {
         sendError(res, new HttpError(500, 'db_error', 'Failed to delete conversation.'))

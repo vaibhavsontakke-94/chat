@@ -19,6 +19,9 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     supabaseAnonKey: null,
     supabaseServiceRoleKey: null,
     supabaseJwtSecret: TEST_SECRET,
+    cronSecret: null,
+    ragSimilarityThreshold: 0.2,
+    ragMaxContextChunks: 6,
     ...overrides,
   }
 }

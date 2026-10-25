@@ -321,13 +321,13 @@ export interface PersistedMessageInput {
 export interface ChatPersistence {
   createConversation: (title?: string, clientId?: string) => Promise<{ id: string } | null>
   addMessage: (conversationId: string, message: PersistedMessageInput) => Promise<boolean>
+  renameConversation?: (id: string, title: string) => Promise<boolean>
   removeConversation?: (id: string) => Promise<boolean>
 }
 
 export interface UseChatOptions {
   model: string | null
   rag?: boolean
-  documentId?: string | null
   documentIdsBySession?: Record<string, string[]>
   accessToken?: string | null
   persistence?: ChatPersistence | null
@@ -351,6 +351,7 @@ export interface UseChatResult {
   clearError: () => void
   hydrate: (sessions: ChatSession[]) => void
   reset: () => void
+  ensureConversation: (sessionId: string, title?: string) => Promise<string | null>
   prependMessages: (
     sessionId: string,
     messages: ChatMessage[],
@@ -374,13 +375,14 @@ export function useChat(options: UseChatOptions): UseChatResult {
   const stateRef = useRef(state)
   const modelRef = useRef(options.model)
   const ragRef = useRef(options.rag)
-  const docRef = useRef(options.documentId)
   const documentIdsBySessionRef = useRef(options.documentIdsBySession)
   const accessTokenRef = useRef(options.accessToken)
   const persistenceRef = useRef(options.persistence)
   const onUnauthorizedRef = useRef(options.onUnauthorized)
   const abortRef = useRef<AbortController | null>(null)
   const remoteIdsRef = useRef(new Map<string, string>())
+  const remoteTitlesRef = useRef(new Map<string, string>())
+  const ensureRef = useRef(new Map<string, Promise<string | null>>())
   const persistQueueRef = useRef(new Map<string, Promise<void>>())
 
   useEffect(() => {
@@ -393,9 +395,6 @@ export function useChat(options: UseChatOptions): UseChatResult {
   useEffect(() => {
     ragRef.current = options.rag
   }, [options.rag])
-  useEffect(() => {
-    docRef.current = options.documentId
-  }, [options.documentId])
   useEffect(() => {
     documentIdsBySessionRef.current = options.documentIdsBySession
   }, [options.documentIdsBySession])
@@ -426,28 +425,64 @@ export function useChat(options: UseChatOptions): UseChatResult {
     })
   }, [])
 
+  const ensureRemoteConversation = useCallback(
+    (sessionId: string, title?: string): Promise<string | null> => {
+      const known =
+        remoteIdsRef.current.get(sessionId) ??
+        stateRef.current.sessions.find((session) => session.id === sessionId)?.remoteId
+      if (known) return Promise.resolve(known)
+
+      const inFlight = ensureRef.current.get(sessionId)
+      if (inFlight) return inFlight
+
+      const persistence = persistenceRef.current
+      if (!persistence) return Promise.resolve(null)
+
+      const session = stateRef.current.sessions.find((item) => item.id === sessionId)
+      const resolvedTitle = title ?? session?.title ?? 'New chat'
+
+      const promise = (async () => {
+        const created = await persistence.createConversation(resolvedTitle, sessionId)
+        if (!created) return null
+        remoteIdsRef.current.set(sessionId, created.id)
+        remoteTitlesRef.current.set(sessionId, resolvedTitle)
+        dispatch({ type: 'session/remote', sessionId, remoteId: created.id })
+        return created.id
+      })()
+
+      ensureRef.current.set(sessionId, promise)
+      const cleanup = () => {
+        if (ensureRef.current.get(sessionId) === promise) ensureRef.current.delete(sessionId)
+      }
+      void promise.then(cleanup, cleanup)
+      return promise
+    },
+    [],
+  )
+
   const persistMessage = useCallback(
     (sessionId: string, title: string, message: PersistedMessageInput) => {
       const persistence = persistenceRef.current
       if (!persistence) return
 
       enqueuePersist(sessionId, async () => {
-        let remoteId =
-          remoteIdsRef.current.get(sessionId) ??
-          stateRef.current.sessions.find((session) => session.id === sessionId)?.remoteId
+        const remoteId = await ensureRemoteConversation(sessionId, title)
+        if (!remoteId) return
 
-        if (!remoteId) {
-          const created = await persistence.createConversation(title, sessionId)
-          if (!created) return
-          remoteId = created.id
-          remoteIdsRef.current.set(sessionId, remoteId)
-          dispatch({ type: 'session/remote', sessionId, remoteId })
+        if (
+          message.role === 'user' &&
+          title !== 'New chat' &&
+          persistence.renameConversation &&
+          remoteTitlesRef.current.get(sessionId) !== title
+        ) {
+          const renamed = await persistence.renameConversation(remoteId, title)
+          if (renamed) remoteTitlesRef.current.set(sessionId, title)
         }
 
         await persistence.addMessage(remoteId, message)
       })
     },
-    [enqueuePersist],
+    [enqueuePersist, ensureRemoteConversation],
   )
 
   /** Completed history for a session, oldest first. */
@@ -491,71 +526,86 @@ export function useChat(options: UseChatOptions): UseChatResult {
       let assistantModel: string | null = modelRef.current
       let assistantCitations: Citation[] = []
 
-      void streamChat(
-        {
-          messages: context,
-          model: modelRef.current,
-          signal: controller.signal,
-          rag,
-          documentId: docRef.current,
-          documentIds,
-          accessToken: accessTokenRef.current,
-        },
-        {
-          onStart: ({ model }) => {
-            assistantModel = model
-            dispatch({ type: 'message/meta', sessionId, id: assistantId, model })
-          },
-          onCitations: (citations) => {
-            assistantCitations = citations as Citation[]
-            dispatch({ type: 'message/citations', sessionId, id: assistantId, citations })
-          },
-          onDelta: (text) => {
-            assistantText += text
-            dispatch({ type: 'message/delta', sessionId, id: assistantId, text })
-          },
-          onDone: () => {
-            abortRef.current = null
-            dispatch({ type: 'message/complete', sessionId, id: assistantId })
-            if (assistantText.trim().length > 0) {
-              persistMessage(sessionId, conversationTitle, {
-                role: 'assistant',
-                content: assistantText,
-                model: assistantModel,
-                clientMessageId: assistantId,
-                citations: assistantCitations,
-              })
-            }
-          },
-        },
-      )
-        .catch((error: unknown) => {
-          abortRef.current = null
+      void (async () => {
+        let conversationId =
+          remoteIdsRef.current.get(sessionId) ??
+          stateRef.current.sessions.find((item) => item.id === sessionId)?.remoteId ??
+          null
 
-          if (controller.signal.aborted) {
-            dispatch({ type: 'message/cancel', sessionId, id: assistantId })
-            return
+        if (documentIds && documentIds.length > 0 && !conversationId) {
+          conversationId = await ensureRemoteConversation(sessionId, conversationTitle)
+          if (!conversationId) {
+            throw new ChatApiError(
+              'Could not prepare this conversation for document chat. Please try again.',
+              'conversation_failed',
+            )
           }
+        }
 
-          if (error instanceof ChatApiError && error.status === 401) {
-            onUnauthorizedRef.current?.()
-          }
+        await streamChat(
+          {
+            messages: context,
+            model: modelRef.current,
+            signal: controller.signal,
+            rag,
+            conversationId,
+            accessToken: accessTokenRef.current,
+          },
+          {
+            onStart: ({ model }) => {
+              assistantModel = model
+              dispatch({ type: 'message/meta', sessionId, id: assistantId, model })
+            },
+            onCitations: (citations) => {
+              assistantCitations = citations as Citation[]
+              dispatch({ type: 'message/citations', sessionId, id: assistantId, citations })
+            },
+            onDelta: (text) => {
+              assistantText += text
+              dispatch({ type: 'message/delta', sessionId, id: assistantId, text })
+            },
+            onDone: () => {
+              abortRef.current = null
+              dispatch({ type: 'message/complete', sessionId, id: assistantId })
+              if (assistantText.trim().length > 0) {
+                persistMessage(sessionId, conversationTitle, {
+                  role: 'assistant',
+                  content: assistantText,
+                  model: assistantModel,
+                  clientMessageId: assistantId,
+                  citations: assistantCitations,
+                })
+              }
+            },
+          },
+        )
+      })().catch((error: unknown) => {
+        abortRef.current = null
 
-          const message =
-            error instanceof ChatApiError
-              ? error.message
-              : 'Something went wrong while contacting the model.'
+        if (controller.signal.aborted) {
+          dispatch({ type: 'message/cancel', sessionId, id: assistantId })
+          return
+        }
 
-          dispatch({
-            type: 'message/fail',
-            sessionId,
-            id: assistantId,
-            error: message,
-            userMessageId,
-          })
+        if (error instanceof ChatApiError && error.status === 401) {
+          onUnauthorizedRef.current?.()
+        }
+
+        const message =
+          error instanceof ChatApiError
+            ? error.message
+            : 'Something went wrong while contacting the model.'
+
+        dispatch({
+          type: 'message/fail',
+          sessionId,
+          id: assistantId,
+          error: message,
+          userMessageId,
         })
+      })
     },
-    [persistMessage],
+    [ensureRemoteConversation, persistMessage],
   )
 
   const sendMessage = useCallback(
@@ -636,6 +686,8 @@ export function useChat(options: UseChatOptions): UseChatResult {
     const remoteId =
       remoteIdsRef.current.get(id) ?? stateRef.current.sessions.find((session) => session.id === id)?.remoteId
     remoteIdsRef.current.delete(id)
+    remoteTitlesRef.current.delete(id)
+    ensureRef.current.delete(id)
     persistQueueRef.current.delete(id)
 
     if (remoteId) {
@@ -651,15 +703,20 @@ export function useChat(options: UseChatOptions): UseChatResult {
 
   const hydrate = useCallback((sessions: ChatSession[]) => {
     remoteIdsRef.current.clear()
+    remoteTitlesRef.current.clear()
+    ensureRef.current.clear()
     persistQueueRef.current.clear()
     for (const session of sessions) {
       remoteIdsRef.current.set(session.id, session.remoteId ?? session.id)
+      remoteTitlesRef.current.set(session.id, session.title)
     }
     dispatch({ type: 'sessions/hydrate', sessions })
   }, [])
 
   const reset = useCallback(() => {
     remoteIdsRef.current.clear()
+    remoteTitlesRef.current.clear()
+    ensureRef.current.clear()
     persistQueueRef.current.clear()
     dispatch({ type: 'sessions/hydrate', sessions: [] })
   }, [])
@@ -703,6 +760,7 @@ export function useChat(options: UseChatOptions): UseChatResult {
     clearError,
     hydrate,
     reset,
+    ensureConversation: ensureRemoteConversation,
     prependMessages,
   }
 }

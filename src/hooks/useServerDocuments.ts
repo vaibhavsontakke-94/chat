@@ -1,5 +1,7 @@
-import { useCallback, useMemo } from 'react'
+﻿import { useCallback, useMemo } from 'react'
 import { useAuth } from '../lib/auth/AuthProvider'
+
+export type DocumentStatus = 'uploading' | 'processing' | 'completed' | 'failed'
 
 export interface ServerDocument {
   id: string
@@ -7,8 +9,10 @@ export interface ServerDocument {
   mime_type: string | null
   size_bytes: number | null
   page_count: number | null
-  status: 'pending' | 'processing' | 'ready' | 'error'
+  status: DocumentStatus
+  error_message?: string | null
   conversation_id?: string | null
+  conversation_ids?: string[]
   created_at: string
   updated_at: string
 }
@@ -24,6 +28,21 @@ export interface UploadResult {
   documentId?: string
   duplicate?: boolean
   status?: string
+}
+
+export interface ReindexResult {
+  ok: boolean
+  message?: string
+  documentId?: string
+  chunks?: number
+  status?: string
+}
+
+export interface DocumentLinkResult {
+  ok: boolean
+  message?: string
+  url?: string
+  filename?: string
 }
 
 export function useServerDocuments() {
@@ -120,8 +139,93 @@ export function useServerDocuments() {
     [authFetch, enabled, user],
   )
 
+  const reindex = useCallback(
+    async (id: string): Promise<ReindexResult> => {
+      if (!enabled || !user) return { ok: false, message: 'Your private session is not ready.' }
+      try {
+        const res = await authFetch(`/api/documents/${id}/reindex`, { method: 'POST' })
+        let json: any = {}
+        try {
+          json = res.status === 204 ? {} : await res.json()
+        } catch {
+          json = {}
+        }
+        if (!res.ok) {
+          return {
+            ok: false,
+            message: json?.error?.message || `Reindex failed (HTTP ${res.status}).`,
+          }
+        }
+        return { ok: true, documentId: json.documentId, chunks: json.chunks, status: json.status }
+      } catch {
+        return { ok: false, message: 'Could not reach the server.' }
+      }
+    },
+    [authFetch, enabled, user],
+  )
+
+  const attach = useCallback(
+    async (id: string, conversationId: string): Promise<boolean> => {
+      if (!enabled || !user) return false
+      try {
+        const res = await authFetch(`/api/documents/${id}/attach`, {
+          method: 'POST',
+          body: JSON.stringify({ conversationId }),
+        })
+        return res.ok
+      } catch {
+        return false
+      }
+    },
+    [authFetch, enabled, user],
+  )
+
+  const detach = useCallback(
+    async (id: string, conversationId: string): Promise<boolean> => {
+      if (!enabled || !user) return false
+      try {
+        const params = new URLSearchParams({ conversationId })
+        const res = await authFetch(`/api/documents/${id}/attach?${params.toString()}`, {
+          method: 'DELETE',
+        })
+        return res.ok
+      } catch {
+        return false
+      }
+    },
+    [authFetch, enabled, user],
+  )
+
+  const link = useCallback(
+    async (id: string): Promise<DocumentLinkResult> => {
+      if (!enabled || !user) return { ok: false, message: 'Your private session is not ready.' }
+      try {
+        const res = await authFetch(`/api/documents/${id}/link`)
+        let json: any = {}
+        try {
+          json = await res.json()
+        } catch {
+          json = {}
+        }
+        if (!res.ok) {
+          return {
+            ok: false,
+            message: json?.error?.message || `Could not open document (HTTP ${res.status}).`,
+          }
+        }
+        if (typeof json.url !== 'string') {
+          return { ok: false, message: 'The server returned an invalid document link.' }
+        }
+        return { ok: true, url: json.url, filename: json.filename }
+      } catch {
+        return { ok: false, message: 'Could not reach the server.' }
+      }
+    },
+    [authFetch, enabled, user],
+  )
+
   return useMemo(
-    () => ({ enabled, signedIn: !!user, list, upload, remove }),
-    [enabled, list, remove, upload, user],
+    () => ({ enabled, signedIn: !!user, list, upload, remove, reindex, attach, detach, link }),
+    [attach, detach, enabled, link, list, reindex, remove, upload, user],
   )
 }

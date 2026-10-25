@@ -1,4 +1,5 @@
 export interface Citation {
+  document_id?: string | null
   filename: string
   page_number: number | null
   chunk_id: string

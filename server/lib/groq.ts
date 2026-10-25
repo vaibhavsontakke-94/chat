@@ -107,6 +107,53 @@ export async function listChatModels(config: AppConfig): Promise<GroqModel[]> {
   return models
 }
 
+interface GroqCompletionResponse {
+  model?: string
+  choices?: Array<{
+    message?: { content?: string | null }
+    finish_reason?: string | null
+  }>
+}
+
+/**
+ * Performs a non-streaming completion. Used for small internal classification
+ * calls where the full answer is needed before the chat stream starts.
+ */
+export async function completeChat(
+  config: AppConfig,
+  request: ChatRequest,
+  signal: AbortSignal,
+): Promise<string> {
+  const model = request.model ?? config.groqChatModel
+  let response: Response
+  try {
+    response = await fetch(`${config.groqBaseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: authHeaders(config),
+      body: JSON.stringify({
+        model,
+        messages: request.messages,
+        temperature: request.temperature,
+        max_tokens: request.maxTokens,
+        stream: false,
+      }),
+      signal,
+    })
+  } catch (error) {
+    if (signal.aborted) throw error
+    throw new ProviderError(502, 'network_error', 'Could not reach the model provider.')
+  }
+
+  if (!response.ok) throw await mapUpstreamError(response)
+
+  const body = (await response.json()) as GroqCompletionResponse
+  const content = body.choices?.[0]?.message?.content
+  if (typeof content !== 'string' || content.trim().length === 0) {
+    throw new ProviderError(502, 'provider_error', 'The model provider returned an empty response.')
+  }
+  return content.trim()
+}
+
 interface GroqChunk {
   id?: string
   model?: string

@@ -22,6 +22,7 @@ export interface StreamChatInput {
   model: string | null
   signal: AbortSignal
   rag?: boolean
+  conversationId?: string | null
   documentId?: string | null
   documentIds?: string[]
   accessToken?: string | null
@@ -141,6 +142,7 @@ export async function streamChat(
         messages: input.messages,
         model: input.model,
         rag: input.rag,
+        conversationId: input.conversationId,
         documentId: input.documentId,
         documentIds: input.documentIds,
       }),

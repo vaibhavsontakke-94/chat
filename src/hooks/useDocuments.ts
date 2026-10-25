@@ -12,7 +12,20 @@ export interface UploadedDocument {
   note?: string
 }
 
-export const ACCEPTED_EXTENSIONS = ['.pdf', '.txt', '.md', '.docx', '.doc', '.csv', '.json', '.html', '.htm']
+export const ACCEPTED_EXTENSIONS = [
+  '.pdf',
+  '.docx',
+  '.txt',
+  '.md',
+  '.markdown',
+  '.csv',
+  '.json',
+  '.html',
+  '.htm',
+  '.png',
+  '.jpg',
+  '.jpeg',
+]
 
 export const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024
 
