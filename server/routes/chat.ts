@@ -259,11 +259,10 @@ export async function handleChat(
       .from('documents')
       .select('id,filename,status')
       .eq('conversation_id', conversationId)
-      .eq('user_id', userId)
+      .eq('user_id', user.id)
       .in('status', ['uploading', 'processing'])
     if (inProgressDocs && inProgressDocs.length > 0) {
       // Document is still processing - prevent misleading answers
-      const processingDoc = inProgressDocs[0]
       await streamResponse(res, config, request, {
         items: [],
         mode: 'general' as const,
