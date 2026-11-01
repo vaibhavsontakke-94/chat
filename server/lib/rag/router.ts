@@ -33,6 +33,31 @@ export function expandVagueDocumentQuestion(question: string): string {
   return `${trimmed} What is this document about? Summarize its main topics and key details from the excerpts.`
 }
 
+/**
+ * Expand a short document question by adding document context.
+ * Ensures the question is specific enough for retrieval.
+ */
+export function expandDocumentQuestion(question: string, documentNames: string[]): string {
+  const trimmed = question.trim()
+  if (trimmed.length === 0) return trimmed
+  if (trimmed.length > 40) return trimmed
+
+  // If the question already references documents, don't expand
+  const documentRefPatterns = [
+    /\b(document|documents|file|files|pdf|attachment|upload)\b/i,
+    /\b(according to|based on|in the|from the)\b/i,
+  ]
+  if (documentRefPatterns.some((pattern) => pattern.test(trimmed))) return trimmed
+
+  // Add context about available documents
+  const docList = documentNames.slice(0, 3).join(', ')
+  if (docList.length > 0) {
+    return `${trimmed} about ${docList}. Summarize the main topics and key details.`
+  }
+
+  return trimmed
+}
+
 const GENERAL_KNOWLEDGE_PATTERNS = [
   /\bcapital (?:of|city)\b/i,
   /\bwho (?:wrote|invented|discovered|won)\b/i,
@@ -74,6 +99,8 @@ export async function classifyQuestion(input: {
 }): Promise<ChatMode> {
   if (input.documentNames.length === 0) return 'general'
 
+  const expandedQuestion = expandVagueDocumentQuestion(input.question)
+
   const attachments = input.documentNames
     .slice(0, 20)
     .map((name) => `- ${sanitizeForPrompt(name).replace(/\s+/g, ' ')}`)
@@ -103,8 +130,8 @@ ${attachments || '(none)'}
 Potentially relevant excerpts:
 ${excerpts || '(none)'}
 
-Question:
-${input.question}`
+Question (expanded if needed):
+${expandedQuestion}`
 
   const answer = await completeChat(
     input.config,
@@ -124,8 +151,13 @@ ${input.question}`
     input.signal,
   )
 
-  return (
-    parseMode(answer) ??
-    fallbackMode(input.question, input.documentNames.length, input.chunks.length)
-  )
+  const classified = parseMode(answer) ?? fallbackMode(expandedQuestion, input.documentNames.length, input.chunks.length)
+
+  // If classified as general but there are relevant chunks and the question looks document-specific,
+  // override to document mode to ensure RAG is used when appropriate
+  if (classified === 'general' && input.chunks.length > 0 && looksDocumentSpecific(expandedQuestion)) {
+    return 'document'
+  }
+
+  return classified
 }

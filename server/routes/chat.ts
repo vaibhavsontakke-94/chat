@@ -253,7 +253,27 @@ export async function handleChat(
   }
 
   if (conversationDocuments.length === 0) {
-    await streamResponse(res, config, request)
+    // Check if any documents for this conversation are still processing/uploading
+    const supabase = getUserSupabase(config, accessToken)
+    const { data: inProgressDocs } = await supabase
+      .from('documents')
+      .select('id,filename,status')
+      .eq('conversation_id', conversationId)
+      .eq('user_id', userId)
+      .in('status', ['uploading', 'processing'])
+    if (inProgressDocs && inProgressDocs.length > 0) {
+      // Document is still processing - prevent misleading answers
+      const processingDoc = inProgressDocs[0]
+      await streamResponse(res, config, request, {
+        items: [],
+        mode: 'general' as const,
+      })
+      // We still stream a response, but the router will classify as general
+      // since there are no completed documents yet. The UI should show the
+      // document status to the user.
+      return
+    }
+    await streamResponse(res, config, request, { items: [], mode: 'general' })
     return
   }
 

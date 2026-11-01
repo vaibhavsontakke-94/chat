@@ -271,14 +271,7 @@ as $$
     )
     and (
       filter_conversation_id is null
-      or c.conversation_id is null
       or c.conversation_id = filter_conversation_id
-      or (filter_document_id is not null and c.document_id = filter_document_id)
-      or (
-        filter_document_ids is not null
-        and cardinality(filter_document_ids) > 0
-        and c.document_id = any(filter_document_ids)
-      )
     )
   order by c.embedding <=> query_embedding
   limit greatest(1, least(coalesce(match_count, 5), 100));
