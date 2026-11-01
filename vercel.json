@@ -1,10 +1,5 @@
 {
   "framework": "vite",
-  "functions": {
-    "server/index.ts": {
-      "runtime": "nodejs20.x"
-    }
-  },
   "routes": [
     {
       "source": "/api/(.*)",
